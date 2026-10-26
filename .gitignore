@@ -1,0 +1,4 @@
+.pio/
+__pycache__/
+# token_tap.cs-ből fordítható (README)
+*.exe
