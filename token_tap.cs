@@ -2,12 +2,14 @@
 // The extension calls it as: token_tap.exe <claude.exe> <arguments...>
 // It starts claude.exe unchanged, passes its output through byte for byte, and meanwhile reads the
 // stream_event lines (the live token stream) and tells the LED over UDP. It also notices when Claude
-// asks the user for approval (control_request / can_use_tool). No proxy, no background process: if the
+// asks the user for approval (control_request / can_use_tool), when a turn ends ("result": finished / error)
+// and what the usage limits are (rate_limit_event). No proxy, no background process: if the
 // LED or the network is unreachable, Claude works exactly the same.
 //
 // Build (the .NET Framework is on every Windows):
 //   C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /optimize /r:System.Web.Extensions.dll token_tap.cs
-// LED address: TOKENLED_HOST environment variable, default tokenled.local (UDP 4210, "T <type> <tokens>", "A 1")
+// LED address: TOKENLED_HOST environment variable, default tokenled.local
+// (UDP 4210, "T <type> <tokens>", "A 1", "D <0|1>", "U <5h%> <7d%>")
 
 using System;
 using System.Collections.Generic;
@@ -129,6 +131,8 @@ static class TokenTap
     static readonly Dictionary<string, Msg> msgs = new Dictionary<string, Msg>();   // main thread and subagents separately
     static bool lineTooLong;
     static volatile bool waiting;   // Claude waits for the user's approval
+    static volatile int doneReq = -1;           // turn finished: 0 ok, 1 error, -1 nothing to send
+    static volatile int use5 = -1, use7 = -1;   // usage limits in percent
 
     static void Feed(byte[] b, int n)
     {
@@ -178,6 +182,26 @@ static class TokenTap
             head.IndexOf("\"type\":\"result\"", StringComparison.Ordinal) >= 0 ||
             head.IndexOf("\"control_cancel_request\"", StringComparison.Ordinal) >= 0)
             waiting = false;
+
+        // End of a turn: "result" (is_error tells success from failure).
+        if (head.IndexOf("\"type\":\"result\"", StringComparison.Ordinal) >= 0)
+        {
+            doneReq = s.IndexOf("\"is_error\":true", StringComparison.Ordinal) >= 0 ? 1 : 0;
+            EnsureSender();
+            return;
+        }
+
+        // Usage limits: rate_limit_event carries the utilisation (0..1) of the 5-hour and 7-day windows.
+        if (complete && head.IndexOf("\"rate_limit_event\"", StringComparison.Ordinal) >= 0)
+        {
+            object w = Get(Get(Get(json.DeserializeObject(s), "rate_limit_info"), "unifiedWindows"), "five_hour");
+            object w7 = Get(Get(Get(json.DeserializeObject(s), "rate_limit_info"), "unifiedWindows"), "seven_day");
+            object u5 = Get(w, "utilization"), u7 = Get(w7, "utilization");
+            if (u5 != null) use5 = (int)Math.Round(Convert.ToDouble(u5) * 100);
+            if (u7 != null) use7 = (int)Math.Round(Convert.ToDouble(u7) * 100);
+            EnsureSender();
+            return;
+        }
 
         if (!complete || s.IndexOf("\"stream_event\"", StringComparison.Ordinal) < 0) return;
         object o = json.DeserializeObject(s);
@@ -278,8 +302,9 @@ static class TokenTap
         string host = Environment.GetEnvironmentVariable("TOKENLED_HOST") ?? "tokenled.local";
         var udp = new UdpClient();
         IPEndPoint ep = null;
-        DateTime nextResolve = DateTime.MinValue, nextPing = DateTime.MinValue, nextWait = DateTime.MinValue;
+        DateTime nextResolve = DateTime.MinValue, nextPing = DateTime.MinValue, nextWait = DateTime.MinValue, nextUse = DateTime.MinValue;
         bool sentWaiting = false;
+        int sent5 = -2, sent7 = -2;
         while (true)
         {
             DateTime now = DateTime.UtcNow;
@@ -306,13 +331,21 @@ static class TokenTap
                 if (w && now >= nextWait) { sb.Append("A 1\n"); nextWait = now.AddSeconds(1); }   // repeated: the LED expires it
                 if (!w && sentWaiting) sb.Append("A 0\n");
                 sentWaiting = w;
+                int d = doneReq;
+                if (d >= 0) { doneReq = -1; sb.Append("D ").Append(d).Append('\n'); }
+                int a = use5, b = use7;
+                if ((a != sent5 || b != sent7 || now >= nextUse) && (a >= 0 || b >= 0))
+                {
+                    sb.Append("U ").Append(a).Append(' ').Append(b).Append('\n');   // repeated: the LED forgets old values
+                    sent5 = a; sent7 = b; nextUse = now.AddSeconds(60);
+                }
                 if (sb.Length > 0)
                 {
                     try { byte[] data = Encoding.ASCII.GetBytes(sb.ToString()); udp.Send(data, data.Length, ep); }
                     catch { }
                 }
             }
-            Thread.Sleep(50);
+            Thread.Sleep(20);
         }
     }
 }

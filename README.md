@@ -97,3 +97,20 @@ goes to the 3.3–6 V VCC/5V pin; the WS2812B draws about 1 mA even when off.
 Protocol (UDP 4210 and USB CDC, one command per line, several lines per UDP packet are fine):
 `T <t|k|j|i|r> <tokens>` raw tokens, `B <type> <count>` flash directly, `A 1` / `A 0` approval wait, `P` keep-alive;
 USB only: `W <ssid>\t<password>`, `?` → `IP <address>` / `NOWIFI`.
+
+## More features
+
+- **Web pages:** *Live* (virtual LEDs, click one to test it, usage bars, 7-day totals, status), *Settings* (all options) and
+  *System* (WiFi, firmware update over WiFi: upload `.pio/build/supermini/firmware.bin`; the page has no password).
+- **Finished / error signal:** at the end of a turn the LED shows solid green (finished) or blinking red (error).
+- **Approval has priority:** while Claude waits for approval, queued flashes are dropped and only the white blink runs.
+- **Usage bar:** the strip shows the 5-hour or weekly limit (from Claude's `rate_limit_event`) as a dim green/yellow/red bar.
+- **History:** optional running light, every flash enters at LED 1 and slides along the strip.
+- **Night:** dim (or switch off) between two hours; time via NTP, time zone as a POSIX string.
+- **7-day totals** are kept in flash (output / new input / cache per day).
+- **MQTT / Home Assistant** (optional, runs in its own task, a missing broker never delays the LED): `prefix/state`
+  (idle, working, approval, done, error), `prefix/usage5`, `prefix/usage7`, plus MQTT discovery.
+- Flashes are fast (~50 ms per flash, faster with a backlog) and the backlog is capped at ~1 s, so the LED stays live.
+  Switch off *Power-saving WiFi* on the Settings page for the lowest latency (needs mains/USB power).
+
+New protocol lines: `D 0` / `D 1` (turn finished / error), `U <5h%> <7d%>` (usage, -1 = unknown).

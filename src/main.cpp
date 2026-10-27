@@ -7,12 +7,16 @@
 //   "T <type> <tokens>"   type: t=text, k=thinking, j=tool input, i=new input, r=cache read
 //   "B <type> <count>"    flash <count> times directly (test)
 //   "A 1" / "A 0"         Claude waits for / got the user's approval (repeat "A 1" every ~1 s)
+//   "D 0" / "D 1"        Claude finished a turn / finished with an error (green / red signal)
+//   "U <5h%> <7d%>"       usage limits in percent (-1 = unknown), shown as a bar on the strip
 //   "P"                   keep-alive (shown on the web page; dim glow if enabled)
 //   "W <ssid>\t<pass>"    set WiFi (USB only), saved to flash; reply: "IP <address>"
 //   "?"                   status (USB only): "IP <address>" or "NOWIFI"
 // LED: red-green-blue test at power-on; a dim dot every 3 s = connecting (red) / setup AP running (yellow).
 // Onboard LED: mirrors everything (default), shows status/approval only, or is off. The strip shows the flashes.
-// Library: Adafruit NeoPixel
+// Web pages: Live (http://tokenled.local), Settings, System (WiFi, firmware update over WiFi).
+// Optional: history strip, usage meter, night dimming (NTP time), 7-day totals (kept in flash), MQTT / Home Assistant.
+// Libraries: Adafruit NeoPixel, PubSubClient
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -21,6 +25,9 @@
 #include <DNSServer.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
+#include <Update.h>
+#include <time.h>
+#include <PubSubClient.h>
 #include <Adafruit_NeoPixel.h>
 
 #define LED_PIN     8        // onboard WS2812B (fixed)
@@ -28,11 +35,18 @@
 #define UDP_PORT    4210
 #define HOSTNAME    "tokenled"   // http://tokenled.local
 #define QUEUE_LEN   32
-#define MAX_PENDING 300     // more queued flashes than this are dropped so the LED never lags by minutes
+#define MAX_PENDING 50      // more queued flashes than this are dropped so the LED never lags by more than about a second
 #define ALIVE_MS    5000    // how long the last message counts as "Claude is running"
 #define WAIT_MS     5000    // approval wait expires this long after the last "A 1"
 #define AP_AFTER_MS 30000   // failed-connection time before the setup AP starts
 #define AP_RETRY_MS 180000  // in AP mode, retry the saved WiFi after this long if nobody joined the AP
+#define WORK_MS     4000    // tokens within this time = "working" (MQTT state)
+#define USE_MS      1800000 // usage values older than this are not shown
+#define HIST_MAX    300     // history strip: LEDs used
+#define HIST_MS     150     // history strip: one step
+#define STATS_MS    300000  // daily totals are saved to flash this often (when changed)
+#define COL_OK      0x00FF00
+#define COL_ERR     0xFF0000
 
 Adafruit_NeoPixel ob(1, LED_PIN, NEO_GRB + NEO_KHZ800);        // onboard LED
 Adafruit_NeoPixel px(0, STRIP_PIN, NEO_GRB + NEO_KHZ800);      // external strip (none until a count is set)
@@ -48,7 +62,16 @@ struct Item { char type; uint16_t n; };
 Item q[QUEUE_LEN];
 uint8_t qHead = 0, qCount = 0;
 uint16_t pending = 0;
-uint32_t lastMsg = 0, waitUntil = 0, approvals = 0;
+uint32_t lastMsg = 0, lastTok = 0, waitUntil = 0, approvals = 0;
+uint32_t sigUntil = 0, doneOk = 0, doneErr = 0;
+bool sigPending = false, sigErr = false;
+uint8_t lastDone = 0;                    // 0 none since the last tokens, 1 finished, 2 error
+int use5 = -1, use7 = -1;                // usage limits in percent
+uint32_t useAt = 0;
+uint32_t hist[HIST_MAX], hcur = 0;       // history strip
+uint8_t appliedB = 0;
+volatile bool mqOk = false, mqReconf = false;
+SemaphoreHandle_t cfgLock;               // settings strings are shared with the MQTT task
 
 enum { IDLE, ON, OFF } state = IDLE;
 uint32_t until = 0;
@@ -67,6 +90,10 @@ struct Cfg {
   uint16_t out, in, cache, count;
   uint8_t bright, pin, onb;   // pin: strip data pin; onb: onboard LED 0 = mirror, 1 = status only, 2 = off
   bool glow, saver;
+  bool doneSig, hist, night, mq;
+  uint8_t meter, nFrom, nTo, nBright;   // meter: 0 off, 1 five-hour, 2 weekly; night hours 0-23
+  uint16_t mqPort;
+  String tz, mqHost, mqUser, mqPass, mqTopic;
   uint32_t col[6];   // colour per type (+ approval), 0xRRGGBB
   String list[6];    // strip LEDs per type (+ approval), as typed: "1,3,5-8", "all", empty = auto
 } cfg;
@@ -113,6 +140,20 @@ void loadCfg() {
   cfg.bright = prefs.getUChar("bright", 120);
   cfg.glow   = prefs.getBool("glow", false);
   cfg.saver  = prefs.getBool("saver", true);
+  cfg.doneSig = prefs.getBool("done", true);
+  cfg.hist   = prefs.getBool("hist", false);
+  cfg.meter  = prefs.getUChar("meter", 0);
+  cfg.night  = prefs.getBool("night", false);
+  cfg.nFrom  = prefs.getUChar("nfrom", 22);
+  cfg.nTo    = prefs.getUChar("nto", 7);
+  cfg.nBright = prefs.getUChar("nbr", 5);
+  cfg.tz     = prefs.getString("tz", "CET-1CEST,M3.5.0,M10.5.0/3");
+  cfg.mq     = prefs.getBool("mq", false);
+  cfg.mqHost = prefs.getString("mqhost", "");
+  cfg.mqPort = prefs.getUShort("mqport", 1883);
+  cfg.mqUser = prefs.getString("mquser", "");
+  cfg.mqPass = prefs.getString("mqpass", "");
+  cfg.mqTopic = prefs.getString("mqtopic", "tokenled");
   for (int i = 0; i < 6; i++) {
     cfg.col[i]  = prefs.getUInt((String("c") + i).c_str(), DEF_COL[i]);
     cfg.list[i] = prefs.getString((String("l") + i).c_str(), "");
@@ -132,6 +173,20 @@ void saveCfg() {
   prefs.putUChar("bright", cfg.bright);
   prefs.putBool("glow", cfg.glow);
   prefs.putBool("saver", cfg.saver);
+  prefs.putBool("done", cfg.doneSig);
+  prefs.putBool("hist", cfg.hist);
+  prefs.putUChar("meter", cfg.meter);
+  prefs.putBool("night", cfg.night);
+  prefs.putUChar("nfrom", cfg.nFrom);
+  prefs.putUChar("nto", cfg.nTo);
+  prefs.putUChar("nbr", cfg.nBright);
+  prefs.putString("tz", cfg.tz);
+  prefs.putBool("mq", cfg.mq);
+  prefs.putString("mqhost", cfg.mqHost);
+  prefs.putUShort("mqport", cfg.mqPort);
+  prefs.putString("mquser", cfg.mqUser);
+  prefs.putString("mqpass", cfg.mqPass);
+  prefs.putString("mqtopic", cfg.mqTopic);
   for (int i = 0; i < 6; i++) {
     prefs.putUInt((String("c") + i).c_str(), cfg.col[i]);
     prefs.putString((String("l") + i).c_str(), cfg.list[i]);
@@ -139,18 +194,140 @@ void saveCfg() {
   prefs.end();
 }
 
-void applyCfg() {
-  px.setBrightness(cfg.bright);
-  ob.setBrightness(cfg.bright);
+// ---------- Time (NTP), night dimming, daily totals ----------
+bool timeOk() { return time(nullptr) > 1700000000; }
+
+bool nightNow() {
+  if (!cfg.night || !timeOk() || cfg.nFrom == cfg.nTo) return false;
+  time_t t = time(nullptr);
+  struct tm tm;
+  localtime_r(&t, &tm);
+  return cfg.nFrom < cfg.nTo ? (tm.tm_hour >= cfg.nFrom && tm.tm_hour < cfg.nTo)
+                             : (tm.tm_hour >= cfg.nFrom || tm.tm_hour < cfg.nTo);
+}
+
+uint8_t curBright() { return nightNow() ? cfg.nBright : cfg.bright; }
+
+void applyBright() {
+  uint8_t b = curBright();
+  if (b == appliedB) return;
+  appliedB = b;
+  px.setBrightness(b);
+  ob.setBrightness(b);
   shown = 1;   // new brightness: force the next colour to be written
+}
+
+void applyCfg() {
+  appliedB = 0;
+  applyBright();
+  shown = 1;
   if (!apOn) WiFi.setSleep(cfg.saver);
 }
 
+void startNtp() { configTzTime(cfg.tz.c_str(), "pool.ntp.org", "time.google.com"); }
+
+// Tokens per day (today first) for the last 7 days: out (text+thinking+tool), new input, cache read.
+struct Day { uint32_t out, in, cache; };
+Day days[7];
+uint32_t dayId = 0;       // calendar day of days[0] (0 = clock not set yet)
+bool statsDirty = false;
+uint32_t statsAt = 0;
+
+uint32_t civilDay(const struct tm& t) {   // days since 0000-03-01, continuous across months and years
+  int y = t.tm_year + 1900, m = t.tm_mon + 1;
+  y -= m <= 2;
+  int era = y / 400;
+  unsigned yoe = y - era * 400;
+  unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + t.tm_mday - 1;
+  return era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy;
+}
+
+void loadStats() {
+  prefs.begin("stats", true);
+  dayId = prefs.getUInt("day", 0);
+  if (prefs.getBytesLength("days") == sizeof(days)) prefs.getBytes("days", days, sizeof(days));
+  prefs.end();
+}
+
+void saveStats() {
+  prefs.begin("stats", false);
+  prefs.putUInt("day", dayId);
+  prefs.putBytes("days", days, sizeof(days));
+  prefs.end();
+  statsDirty = false;
+  statsAt = millis();
+}
+
+void rollDay() {
+  if (!timeOk()) return;
+  time_t t = time(nullptr);
+  struct tm tm;
+  localtime_r(&t, &tm);
+  uint32_t id = civilDay(tm);
+  if (!dayId) { dayId = id; statsDirty = true; return; }
+  if (id == dayId) return;
+  uint32_t d = id > dayId ? id - dayId : 7;
+  if (d >= 7) memset(days, 0, sizeof(days));
+  else {
+    memmove(days + d, days, (7 - d) * sizeof(Day));
+    memset(days, 0, d * sizeof(Day));
+  }
+  dayId = id;
+  saveStats();
+}
+
 // ---------- LED ----------
-// Lights the strip LEDs that belong to function f in colour c (everything else off).
-void drawStrip(uint32_t c, int f) {
+uint32_t scaleCol(uint32_t c, uint32_t k) {   // k/255 of the colour
+  return (((c >> 16 & 255) * k / 255) << 16) | (((c >> 8 & 255) * k / 255) << 8) | ((c & 255) * k / 255);
+}
+
+bool histMode() { return cfg.hist && px.numPixels() >= 2; }
+
+int meterValue() {   // usage in percent for the meter, -1 = off / unknown / stale
+  if (!cfg.meter || !useAt || millis() - useAt > USE_MS) return -1;
+  return constrain(cfg.meter == 1 ? use5 : use7, -1, 100);
+}
+
+// Background of the strip: the history (running light) or the usage bar, dim.
+void drawBase() {
   px.clear();
-  if (f < 0 || c == 0) { px.fill(c); return; }
+  uint16_t n = min<uint16_t>(px.numPixels(), HIST_MAX);
+  if (n < 2) return;
+  if (cfg.hist) {
+    for (uint16_t i = 0; i < n; i++)
+      if (hist[i]) px.setPixelColor(i, scaleCol(hist[i], 255 - (uint32_t)i * 200 / n));
+    return;
+  }
+  int u = meterValue();
+  if (u < 0) return;
+  uint32_t lit = (u * n + 50) / 100;
+  if (u > 0 && !lit) lit = 1;
+  uint32_t c = u < 60 ? px.Color(0, 30, 0) : u < 85 ? px.Color(35, 25, 0) : px.Color(40, 0, 0);
+  for (uint32_t i = 0; i < lit; i++) px.setPixelColor(i, c);
+}
+
+void histTick() {
+  static uint32_t at = 0;
+  uint32_t now = millis();
+  if (now - at < HIST_MS) return;
+  at = now;
+  uint16_t n = min<uint16_t>(px.numPixels(), HIST_MAX);
+  if (!histMode()) return;
+  bool any = hcur;
+  for (uint16_t i = 0; i < n && !any; i++) any = hist[i];
+  if (!any) return;
+  memmove(hist + 1, hist, (n - 1) * sizeof(hist[0]));
+  hist[0] = hcur;
+  hcur = 0;
+  shown = 1;
+}
+
+// Lights the strip LEDs that belong to function f in colour c on top of the background.
+// f = -1: every LED, -3: background only (history mode: the flash goes into the history instead).
+void drawStrip(uint32_t c, int f) {
+  drawBase();
+  if (c == 0 || f == -3) return;
+  if (f < 0) { px.fill(c); return; }
   Sel& s = sel[f];
   if (s.autoSel) {
     if (cfg.count >= (f < 5 ? 5 : 6)) px.setPixelColor(f, c); else px.fill(c);
@@ -163,7 +340,7 @@ void drawStrip(uint32_t c, int f) {
 }
 
 // target: function 0-5 (type or approval: its LEDs on the strip), -1 = all strip LEDs,
-//         -2 = status (first strip LED, only when the onboard LED is off).
+//         -2 = status (first strip LED, only when the onboard LED is off), -3 = onboard LED only (history mode).
 // flash: a token flash (the onboard LED may be set to show status only).
 void led(uint32_t c, int target = -1, bool flash = false) {
   if (c == 0) target = -1;
@@ -176,7 +353,7 @@ void led(uint32_t c, int target = -1, bool flash = false) {
   ob.show();
   if (!px.numPixels()) return;
   if (target == -2 && cfg.onb != 2) c = 0;
-  if (target == -2) { px.clear(); px.setPixelColor(0, c); } else drawStrip(c, target);
+  if (target == -2) { drawBase(); if (c) px.setPixelColor(0, c); } else drawStrip(c, target);
   px.show();
 }
 
@@ -187,7 +364,7 @@ void applyHw() {
   px.setPin(cfg.pin);
   px.updateLength(cfg.count);
   if (cfg.count && !px.numPixels()) { cfg.count = 0; saveCfg(); }   // did not fit in memory
-  px.setBrightness(cfg.bright);
+  px.setBrightness(appliedB);
   shown = 1;
 }
 
@@ -231,6 +408,10 @@ void addTokens(char type, long n) {
   int i = typeIdx(type);
   type = TYPES[i];
   total[i] += n;
+  lastTok = millis();
+  lastDone = 0;
+  (i == 3 ? days[0].in : i == 4 ? days[0].cache : days[0].out) += n;
+  statsDirty = true;
   uint16_t u = unitFor(type);
   if (!u) return;
   rem[i] += n;
@@ -247,18 +428,37 @@ void setWaiting(bool on) {
 // Plays the queued flashes; the more are waiting, the faster it goes.
 void play() {
   uint32_t now = millis();
+  if (waitUntil && (int32_t)(now - waitUntil) < 0) {      // Claude waits for approval: drop every other flash, white blink only
+    qCount = 0;
+    pending = 0;
+    hcur = 0;
+    state = IDLE;
+    if (now / 500 % 2 == 0) led(rgb(5), 5);
+    else led(0);
+    return;
+  }
   if (state != IDLE && (int32_t)(now - until) < 0) return;
 
   if (state == ON) {
     led(0);
-    int off = constrain(80 - pending * 2, 20, 80);
-    if (!qCount || q[qHead].type != curType) off += 150;  // pause when the type changes
+    int off = constrain(30 - pending, 6, 30);
+    if (!qCount || q[qHead].type != curType) off += 50;   // short pause when the type changes
     state = OFF; until = now + off;
     return;
   }
 
   if (!qCount) {
     state = IDLE;
+    if (sigPending) {
+      sigPending = false;
+      sigUntil = now + (sigErr ? 2000 : 1500);
+    }
+    if (sigUntil && (int32_t)(now - sigUntil) < 0) {      // finished (solid green) / error (red blinking)
+      if (!sigErr || now / 250 % 2 == 0) led(sigErr ? COL_ERR : COL_OK, -1);
+      else led(0);
+      return;
+    }
+    sigUntil = 0;
     if (waitUntil && (int32_t)(now - waitUntil) < 0) {     // Claude waits for approval: white blink
       if (now / 500 % 2 == 0) led(rgb(5), 5);
       else led(0);
@@ -275,11 +475,13 @@ void play() {
 
   Item& it = q[qHead];
   curType = it.type;
-  led(color(curType), typeIdx(curType), true);
+  bool hm = histMode();
+  if (hm) hcur = color(curType);
+  led(color(curType), hm ? -3 : typeIdx(curType), true);
   flashes[typeIdx(curType)]++;
   if (--it.n == 0) { qHead = (qHead + 1) % QUEUE_LEN; qCount--; }
   pending--;
-  state = ON; until = now + (pending > 30 ? 20 : 35);
+  state = ON; until = now + (pending > 15 ? 10 : 22);
 }
 
 // ---------- Input ----------
@@ -292,10 +494,20 @@ void storeWifi(const String& ssid, const String& pass);
 
 void handleLine(char* s, bool usb) {
   lastMsg = millis();
-  char type; long n;
+  char type; long n, m;
   if (sscanf(s, "T %c %ld", &type, &n) == 2) addTokens(type, n);
   else if (sscanf(s, "B %c %ld", &type, &n) == 2) enqueue(type, n);
   else if (sscanf(s, "A %ld", &n) == 1) setWaiting(n != 0);
+  else if (sscanf(s, "D %ld", &n) == 1) {
+    waitUntil = 0;
+    lastDone = n ? 2 : 1;
+    (n ? doneErr : doneOk)++;
+    if (cfg.doneSig) { sigErr = n != 0; sigPending = true; sigUntil = 0; }
+  }
+  else if (sscanf(s, "U %ld %ld", &n, &m) == 2) {
+    use5 = n; use7 = m; useAt = millis();
+    shown = 1;
+  }
   else if (usb && s[0] == 'W' && s[1] == ' ') {
     char* tab = strchr(s + 2, '\t');
     if (tab) { *tab = 0; storeWifi(s + 2, tab + 1); }
@@ -384,6 +596,7 @@ void network() {
       mdnsStarted = true;
     }
     if (apOn) apStop();
+    startNtp();
     printStatus();
   }
   if (!up && netUp) staSince = now;   // connection lost: count from here
@@ -412,24 +625,38 @@ void network() {
   http.handleClient();
 }
 
-// ---------- Web page ----------
+// ---------- Web pages: Live, Settings, System ----------
 const char PAGE_HEAD[] PROGMEM = R"(<!doctype html><html lang=en><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>Token LED</title>
 <style>body{font:15px system-ui,sans-serif;max-width:480px;margin:16px auto;padding:0 16px;background:#141414;color:#ddd}
-h2{margin:8px 0 16px}h3{margin:24px 0 8px;font-size:15px;color:#999}a{color:#6bf}
+h2{margin:8px 0 8px}h3{margin:24px 0 8px;font-size:15px;color:#999}a{color:#6bf}
+nav{display:flex;gap:20px;margin:0 0 16px;border-bottom:1px solid #333}nav a{padding:6px 0;text-decoration:none;color:#999}
+nav a.a{color:#fff;border-bottom:2px solid #6bf}
 label{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:10px 0}
 input:not([type=checkbox]),select{width:90px;padding:4px;background:#222;color:#eee;border:1px solid #444;border-radius:4px}
-input[name=ssid],input[name=pass]{width:180px}
+input[name=ssid],input[name=pass],input.w{width:180px}
 input.lst{width:110px}input[type=color]{width:44px;height:28px;padding:0}
 button{padding:8px 16px;margin:12px 8px 0 0;background:#333;color:#eee;border:1px solid #555;border-radius:6px}
 .d{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:3px}
 .box{border:1px solid #a80;border-radius:8px;padding:4px 12px 12px;margin-bottom:16px}
-summary{cursor:pointer;color:#999;margin-top:24px}
-table{width:100%;border-collapse:collapse}td{padding:3px 0}td+td{text-align:right;font-variant-numeric:tabular-nums}
-small{color:#888}
+table{width:100%;border-collapse:collapse}td,th{padding:3px 0}td+td,th+th{text-align:right;font-variant-numeric:tabular-nums}
+th{color:#888;font-weight:normal}
+small{color:#888}.ok{color:#6c6}
 .g{display:grid;grid-template-columns:repeat(6,1fr);gap:4px;text-align:center;margin:12px 0}
 .l{width:30px;height:30px;border-radius:50%;margin:0 auto 6px;border:1px solid #333}
-.g small{display:block}.g b{font-size:12px}</style><h2>Token LED</h2>)";
+.g small{display:block}.g b{font-size:12px}
+.bar{height:8px;background:#222;border-radius:4px;margin:4px 0 12px}.bar i{display:block;height:8px;border-radius:4px;background:#4a4;width:0}
+</style><h2>Token LED</h2>)";
+
+String nav(int cur) {
+  const char* href[] = {"/", "/settings", "/system"};
+  const char* name[] = {"Live", "Settings", "System"};
+  String s = "<nav>";
+  for (int i = 0; i < 3; i++) s += String("<a href=") + href[i] + (i == cur ? " class=a" : "") + ">" + name[i] + "</a>";
+  return s + "</nav>";
+}
+
+String page(int cur) { return String(FPSTR(PAGE_HEAD)) + nav(cur); }
 
 String dot(const String& c) { return "<i class=d style=background:" + c + "></i>"; }
 
@@ -442,51 +669,74 @@ String checkField(const char* name, const char* label, bool v) {
   return String("<label><span>") + label + "</span><input type=checkbox name=" + name + (v ? " checked" : "") + "></label>";
 }
 
+String textField(const char* name, const char* label, const String& v, const char* type = "text", const char* ph = "") {
+  return String("<label><span>") + label + "</span><input class=w type=" + type + " name=" + name + " placeholder=\"" + ph +
+         "\" value=\"" + esc(v) + "\"></label>";
+}
+
+String selField(const char* name, const char* label, int cur, std::initializer_list<const char*> opts) {
+  String s = String("<label><span>") + label + "</span><select name=" + name + ">";
+  int i = 0;
+  for (const char* o : opts) { s += String("<option value=") + i + (i == cur ? " selected" : "") + ">" + o + "</option>"; i++; }
+  return s + "</select></label>";
+}
+
 String wifiForm() {
   return "<form method=post action=/wifi><label><span>Network (2.4 GHz)</span><input name=ssid list=ssids required value=\"" +
          esc(savedSsid) + "\"></label><datalist id=ssids>" + ssidOptions + "</datalist>"
          "<label><span>Password</span><input type=password name=pass></label><button>Connect</button></form>";
 }
 
+String kfmt(uint32_t n) {
+  if (n >= 1000000) return String(n / 1e6, 1) + "M";
+  if (n >= 1000) return String(n / 1e3, 1) + "k";
+  return String(n);
+}
+
+const char* stateName() {
+  uint32_t now = millis();
+  if (waitUntil && (int32_t)(now - waitUntil) < 0) return "approval";
+  if (lastTok && now - lastTok < WORK_MS) return "working";
+  if (lastDone) return lastDone == 2 ? "error" : "done";
+  return "idle";
+}
+
 void handleRoot() {
   uint32_t ago = (millis() - lastMsg) / 1000;
-  String s = FPSTR(PAGE_HEAD);
+  String s = page(0);
   if (apOn) s += "<div class=box><h3>WiFi setup</h3>" + wifiForm() + "</div>";
 
   // Virtual LEDs: one column per type, plus the approval signal
   s += "<div class=g>";
   for (int i = 0; i < 6; i++) {
-    s += String("<div><div class=l id=l") + i + " style=background:" + hex(i) + ";opacity:.15></div><b>" + NAMES[i] +
+    s += String("<div><div class=l onclick=\"fetch('/b?t=") + (i < 5 ? String(TYPES[i]) : String("a")) + "')\" id=l" + i + " style=background:" + hex(i) + ";opacity:.15></div><b>" + NAMES[i] +
          "</b><small id=n" + i + ">" + (i < 5 ? total[i] : approvals) + "</small><small id=f" + i + ">" +
          (i < 5 ? String(flashes[i]) + " flashes" : String("idle")) + "</small></div>";
   }
-  s += "</div>";
+  s += "</div><small>Click a LED to test it.</small>";
 
-  s += "<form method=post action=/save>";
-  s += numField("out", dot(hex(0)) + dot(hex(1)) + dot(hex(2)) + "Text, thinking, tool: tokens per flash", cfg.out, 0, 60000);
-  s += numField("in", dot(hex(3)) + "New input: tokens per flash", cfg.in, 0, 60000);
-  s += numField("cache", dot(hex(4)) + "Cache read: tokens per flash", cfg.cache, 0, 60000);
-  s += "<small>0 = no flash for this type.</small>";
-  s += numField("bright", "Brightness (1–255)", cfg.bright, 1, 255);
-  s += checkField("glow", "Dim glow while Claude is running", cfg.glow);
-  s += checkField("saver", "Power-saving WiFi (for battery; off = faster)", cfg.saver);
+  s += "<table><tr><td>State</td><td id=st>" + String(stateName()) + "</td></tr>"
+       "<tr><td>Usage, 5 hours</td><td id=u5>-</td></tr></table><div class=bar><i id=b5></i></div>"
+       "<table><tr><td>Usage, 7 days</td><td id=u7>-</td></tr></table><div class=bar><i id=b7></i></div>";
 
-  s += "<h3>LEDs</h3>";
-  s += String("<label><span>Onboard LED (GPIO8)</span><select name=onb>") +
-       "<option value=0" + (cfg.onb == 0 ? " selected" : "") + ">mirror everything</option>" +
-       "<option value=1" + (cfg.onb == 1 ? " selected" : "") + ">status + approval only</option>" +
-       "<option value=2" + (cfg.onb == 2 ? " selected" : "") + ">off</option></select></label>";
-  s += "<label><span>External strip: LEDs</span><input type=number name=count min=0 max=65535 list=cnt value=" +
-       String(cfg.count) + "></label><datalist id=cnt><option>0<option>1<option>2<option>5<option>6<option>10<option>50<option>100</datalist>";
-  s += numField("pin", "External strip data pin (GPIO 0–7, 10)", cfg.pin, 0, 10);
-  for (int i = 0; i < 6; i++) {
-    s += String("<label><span>") + dot(hex(i)) + NAMES[i] + "</span><span><input type=color name=c" + i + " value=" + hex(i) +
-         "> <input class=lst name=g" + i + " placeholder=auto value=\"" + esc(cfg.list[i]) + "\"></span></label>";
+  s += "<h3>Last 7 days</h3><table><tr><th>Day<th>Output<th>New input<th>Cache</tr>";
+  Day sum = {0, 0, 0};
+  time_t now = time(nullptr);
+  for (int d = 0; d < 7; d++) {
+    String label = d == 0 ? "today" : String("-") + d + " d";
+    if (timeOk()) {
+      time_t t = now - d * 86400L;
+      struct tm tm;
+      localtime_r(&t, &tm);
+      char b[12];
+      strftime(b, sizeof(b), "%m-%d", &tm);
+      label = String(b) + (d == 0 ? " (today)" : "");
+    }
+    s += "<tr><td>" + label + "<td>" + kfmt(days[d].out) + "<td>" + kfmt(days[d].in) + "<td>" + kfmt(days[d].cache) + "</tr>";
+    sum.out += days[d].out; sum.in += days[d].in; sum.cache += days[d].cache;
   }
-  s += "<small>Colour per type (onboard LED and strip). LEDs (strip): a list like <b>1,3,5-8</b> (1 = first LED), "
-       "<b>all</b> or 0 = every LED, empty = auto: with 5+ LEDs every type has its own LED (approval: the 6th), "
-       "otherwise all LEDs flash together. Several types may share LEDs.</small>";
-  s += "<br><button>Save</button></form><form method=post action=/test><button>Colour test</button></form>";
+  s += "<tr><td><b>7 days</b><td>" + kfmt(sum.out) + "<td>" + kfmt(sum.in) + "<td>" + kfmt(sum.cache) + "</tr></table>";
+  s += "<small>Kept in flash (saved every 5 min). Output = text + thinking + tool input.</small>";
 
   s += "<h3>Status</h3><table>";
   if (apOn) s += "<tr><td>Setup network</td><td>" + apName + "</td></tr>";
@@ -498,48 +748,121 @@ void handleRoot() {
   s += "<tr><td>Uptime</td><td>" + String(millis() / 60000) + " min</td></tr>";
   s += "<tr><td>Last message from the PC</td><td>" + (lastMsg ? String(ago) + " s ago" : String("none yet")) + "</td></tr>";
   s += "<tr><td>Queued flashes</td><td>" + String(pending) + "</td></tr>";
+  s += "<tr><td>Turns finished / with error</td><td id=dn>" + String(doneOk) + " / " + String(doneErr) + "</td></tr>";
   s += "</table><small>Token and flash counts since power-on; the last column counts approval requests.</small>";
-  if (!apOn) s += "<details><summary>Change WiFi network</summary>" + wifiForm() +
-                  "<small>If it cannot connect within 30 s, the setup network starts: " + apName + "</small></details>";
 
-  s += F("<script>const n=[],f=[],l=[],lit=[];let wait=0,last=null;"
-         "for(let i=0;i<6;i++){n[i]=document.getElementById('n'+i);f[i]=document.getElementById('f'+i);"
-         "l[i]=document.getElementById('l'+i);lit[i]=0;}"
+  s += F("<script>const n=[],f=[],l=[],lit=[],$=i=>document.getElementById(i);let wait=0,last=null;"
+         "for(let i=0;i<6;i++){n[i]=$('n'+i);f[i]=$('f'+i);l[i]=$('l'+i);lit[i]=0;}"
+         "function use(k,v){$('u'+k).textContent=v<0?'-':v+' %';const b=$('b'+k).style;b.width=Math.max(v,0)+'%';"
+         "b.background=v>=85?'#c44':v>=60?'#cb4':'#4a4';}"
          "function poll(){if(document.hidden)return;fetch('/s').then(r=>r.json()).then(s=>{"
          "for(let i=0;i<5;i++){n[i].textContent=s.t[i];f[i].textContent=s.f[i]+' flashes';"
          "if(last&&s.f[i]!=last[i])lit[i]=Date.now();}"
-         "wait=s.w;n[5].textContent=s.a;f[5].textContent=s.w?'waiting':'idle';last=s.f;}).catch(()=>{});}"
+         "wait=s.w;n[5].textContent=s.a;f[5].textContent=s.w?'waiting':'idle';last=s.f;"
+         "$('st').textContent=s.s;use(5,s.u5);use(7,s.u7);$('dn').textContent=s.d+' / '+s.e;}).catch(()=>{});}"
          "function fade(){const now=Date.now();for(let i=0;i<5;i++)"
          "l[i].style.opacity=.15+.85*Math.max(0,1-(now-lit[i])/400);"
          "l[5].style.opacity=wait?(Math.floor(now/500)%2?1:.35):.15;requestAnimationFrame(fade);}"
-         "setInterval(poll,200);fade();</script>");
+         "setInterval(poll,100);fade();</script>");
   http.send(200, "text/html; charset=utf-8", s);
 }
 
-// Live state for the virtual LEDs: tokens and flashes per type (t,k,j,i,r order), approval wait.
+void handleSettings() {
+  String s = page(1);
+  if (http.hasArg("saved")) s += "<p class=ok>Saved.</p>";
+  s += "<form method=post action=/save>";
+  s += numField("out", dot(hex(0)) + dot(hex(1)) + dot(hex(2)) + "Text, thinking, tool: tokens per flash", cfg.out, 0, 60000);
+  s += numField("in", dot(hex(3)) + "New input: tokens per flash", cfg.in, 0, 60000);
+  s += numField("cache", dot(hex(4)) + "Cache read: tokens per flash", cfg.cache, 0, 60000);
+  s += "<small>0 = no flash for this type.</small>";
+  s += numField("bright", "Brightness (1–255)", cfg.bright, 1, 255);
+  s += checkField("glow", "Dim glow while Claude is running", cfg.glow);
+  s += checkField("saver", "Power-saving WiFi (for battery; off = faster)", cfg.saver);
+  s += checkField("done", "Signal when Claude finishes (green) or fails (red)", cfg.doneSig);
+
+  s += "<h3>LEDs</h3>";
+  s += selField("onb", "Onboard LED (GPIO8)", cfg.onb, {"mirror everything", "status + approval only", "off"});
+  s += "<label><span>External strip: LEDs</span><input type=number name=count min=0 max=65535 list=cnt value=" +
+       String(cfg.count) + "></label><datalist id=cnt><option>0<option>1<option>2<option>5<option>6<option>10<option>50<option>100</datalist>";
+  s += numField("pin", "External strip data pin (GPIO 0–7, 10)", cfg.pin, 0, 10);
+  for (int i = 0; i < 6; i++) {
+    s += String("<label><span>") + dot(hex(i)) + NAMES[i] + "</span><span><input type=color name=c" + i + " value=" + hex(i) +
+         "> <input class=lst name=g" + i + " placeholder=auto value=\"" + esc(cfg.list[i]) + "\"></span></label>";
+  }
+  s += "<small>Colour per type (onboard LED and strip). LEDs (strip): a list like <b>1,3,5-8</b> (1 = first LED), "
+       "<b>all</b> or 0 = every LED, empty = auto: with 5+ LEDs every type has its own LED (approval: the 6th), "
+       "otherwise all LEDs flash together. Several types may share LEDs.</small>";
+
+  s += "<h3>Strip display</h3>";
+  s += checkField("hist", "History: flashes run along the strip like a running light", cfg.hist);
+  s += selField("meter", "Usage bar (dim, needs 2+ LEDs)", cfg.meter, {"off", "5-hour limit", "weekly limit"});
+  s += "<small>The usage bar is not shown while the history is on.</small>";
+
+  s += "<h3>Night</h3>";
+  s += checkField("night", "Dim at night", cfg.night);
+  s += numField("nfrom", "From (hour)", cfg.nFrom, 0, 23);
+  s += numField("nto", "To (hour)", cfg.nTo, 0, 23);
+  s += numField("nbr", "Night brightness (0 = off)", cfg.nBright, 0, 255);
+  s += textField("tz", "Time zone (POSIX)", cfg.tz);
+  s += String("<small>Time from the internet (NTP)") + (timeOk() ? ", clock is set." : ", clock not set yet.") + "</small>";
+
+  s += "<h3>MQTT / Home Assistant</h3>";
+  s += checkField("mq", "Publish the state over MQTT", cfg.mq);
+  s += textField("mqhost", "Broker", cfg.mqHost, "text", "192.168.0.10");
+  s += numField("mqport", "Port", cfg.mqPort, 1, 65535);
+  s += textField("mquser", "User", cfg.mqUser);
+  s += textField("mqpass", "Password", "", "password", cfg.mqPass.length() ? "(unchanged)" : "");
+  s += textField("mqtopic", "Topic prefix", cfg.mqTopic);
+  s += "<small>Topics: <b>prefix/state</b> (idle, working, approval, done, error), <b>prefix/usage5</b>, <b>prefix/usage7</b>; "
+       "Home Assistant finds the sensors by itself (MQTT discovery). A missing broker never affects the LED.</small>";
+
+  s += "<br><button>Save</button></form><form method=post action=/test><button>Colour test</button></form>";
+  http.send(200, "text/html; charset=utf-8", s);
+}
+
+void handleSystem() {
+  String s = page(2);
+  s += "<h3>WiFi</h3>";
+  if (apOn) s += "<p>Setup network running: " + apName + "</p>";
+  s += wifiForm();
+  s += "<small>If it cannot connect within 30 s, the setup network starts: " + apName + "</small>";
+  s += "<h3>Firmware update</h3><form method=post action=/update enctype=multipart/form-data>"
+       "<input type=file name=fw accept=.bin required style=width:100%><br><button>Upload and restart</button></form>"
+       "<small>Pick <b>.pio/build/supermini/firmware.bin</b>. The page has no password: anyone on your network can open it.</small>";
+  s += "<h3>Device</h3><table><tr><td>Free memory</td><td>" + String(ESP.getFreeHeap() / 1024) + " kB</td></tr>"
+       "<tr><td>Clock</td><td>" + (timeOk() ? "set" : "not set") + "</td></tr>"
+       "<tr><td>MQTT</td><td>" + (!cfg.mq ? "off" : mqOk ? "connected" : "not connected") + "</td></tr></table>";
+  http.send(200, "text/html; charset=utf-8", s);
+}
+
+// Live state for the page: tokens and flashes per type (t,k,j,i,r order), approval wait, usage, state.
 void handleState() {
   String s = "{\"t\":[";
   for (int i = 0; i < 5; i++) s += String(i ? "," : "") + total[i];
   s += "],\"f\":[";
   for (int i = 0; i < 5; i++) s += String(i ? "," : "") + flashes[i];
   bool waiting = waitUntil && (int32_t)(millis() - waitUntil) < 0;
-  s += "],\"w\":" + String(waiting ? 1 : 0) + ",\"a\":" + String(approvals) + "}";
+  bool fresh = useAt && millis() - useAt < USE_MS;
+  s += "],\"w\":" + String(waiting ? 1 : 0) + ",\"a\":" + String(approvals) + ",\"s\":\"" + stateName() + "\"" +
+       ",\"u5\":" + (fresh ? use5 : -1) + ",\"u7\":" + (fresh ? use7 : -1) + ",\"d\":" + doneOk + ",\"e\":" + doneErr + "}";
   http.sendHeader("Cache-Control", "no-store");
   http.send(200, "application/json", s);
 }
 
-void redirectHome() {
-  http.sendHeader("Location", "/");
+void redirectTo(const char* where) {
+  http.sendHeader("Location", where);
   http.send(303);
 }
 
 void handleSave() {
+  xSemaphoreTake(cfgLock, portMAX_DELAY);
   cfg.out    = constrain(http.arg("out").toInt(), 0, 60000);
   cfg.in     = constrain(http.arg("in").toInt(), 0, 60000);
   cfg.cache  = constrain(http.arg("cache").toInt(), 0, 60000);
   cfg.bright = constrain(http.arg("bright").toInt(), 1, 255);
   cfg.glow   = http.hasArg("glow");
   cfg.saver  = http.hasArg("saver");
+  cfg.doneSig = http.hasArg("done");
   for (int i = 0; i < 6; i++) {
     String a = http.arg(String("g") + i);
     a.trim();
@@ -554,22 +877,54 @@ void handleSave() {
   bool hw = count != cfg.count || (pinOk(pin) && pin != cfg.pin);
   cfg.count = count;
   if (pinOk(pin)) cfg.pin = pin;
+
+  cfg.hist  = http.hasArg("hist");
+  cfg.meter = constrain(http.arg("meter").toInt(), 0, 2);
+  memset(hist, 0, sizeof(hist));
+  hcur = 0;
+  cfg.night = http.hasArg("night");
+  cfg.nFrom = constrain(http.arg("nfrom").toInt(), 0, 23);
+  cfg.nTo   = constrain(http.arg("nto").toInt(), 0, 23);
+  cfg.nBright = constrain(http.arg("nbr").toInt(), 0, 255);
+  String tz = http.arg("tz");
+  tz.trim();
+  if (tz.length() && tz != cfg.tz) { cfg.tz = tz.substring(0, 60); startNtp(); }
+
+  cfg.mq = http.hasArg("mq");
+  cfg.mqHost = http.arg("mqhost").substring(0, 60);
+  cfg.mqHost.trim();
+  cfg.mqPort = constrain(http.arg("mqport").toInt(), 1, 65535);
+  cfg.mqUser = http.arg("mquser").substring(0, 40);
+  if (http.arg("mqpass").length()) cfg.mqPass = http.arg("mqpass").substring(0, 60);
+  String topic = http.arg("mqtopic");
+  topic.trim();
+  cfg.mqTopic = topic.length() ? topic.substring(0, 40) : "tokenled";
+  mqReconf = true;
   saveCfg();
+  xSemaphoreGive(cfgLock);
   if (hw) applyHw();
   applyCfg();
-  redirectHome();
+  redirectTo("/settings?saved");
+}
+
+void handleBlink() {   // click on a virtual LED: 'a' = approval blink for 3 s, otherwise 3 flashes of that type
+  String t = http.arg("t");
+  if (t == "a") { waitUntil = millis() + 3000; approvals++; }
+  else if (t.length() == 1 && strchr(TYPES, t[0])) enqueue(t[0], 3);
+  http.send(204);
 }
 
 void handleTest() {
   for (const char* t = TYPES; *t; t++) enqueue(*t, 3);
-  setWaiting(true);
-  redirectHome();
+  sigErr = false;
+  sigPending = cfg.doneSig;
+  redirectTo("/settings");
 }
 
 void handleWifi() {
   String ssid = http.arg("ssid");
   ssid.trim();
-  if (!ssid.length()) { redirectHome(); return; }
+  if (!ssid.length()) { redirectTo("/"); return; }
   storeWifi(ssid, http.arg("pass"));
   String s = FPSTR(PAGE_HEAD);
   s += "<p>Saved, connecting to <b>" + esc(ssid) + "</b></p>"
@@ -579,6 +934,32 @@ void handleWifi() {
   http.send(200, "text/html; charset=utf-8", s);
 }
 
+// Firmware update over WiFi: the browser posts firmware.bin, the ESP writes it to the other app slot and restarts.
+void handleUpdateDone() {
+  bool ok = !Update.hasError();
+  http.sendHeader("Connection", "close");
+  http.send(200, "text/plain", ok ? "Update OK, restarting..." : String("Update failed: ") + Update.errorString());
+  if (ok) {
+    if (statsDirty) saveStats();
+    delay(500);
+    ESP.restart();
+  }
+}
+
+void handleUpload() {
+  HTTPUpload& u = http.upload();
+  if (u.status == UPLOAD_FILE_START) {
+    led(px.Color(0, 0, 255));
+    Update.begin(UPDATE_SIZE_UNKNOWN);
+  } else if (u.status == UPLOAD_FILE_WRITE) {
+    Update.write(u.buf, u.currentSize);
+  } else if (u.status == UPLOAD_FILE_END) {
+    Update.end(true);
+  } else if (u.status == UPLOAD_FILE_ABORTED) {
+    Update.abort();
+  }
+}
+
 // In setup mode every unknown address (including the phones' connectivity checks) leads to the setup page.
 void handleNotFound() {
   if (!apOn) { http.send(404, "text/plain", "Not found"); return; }
@@ -586,19 +967,84 @@ void handleNotFound() {
   http.send(302);
 }
 
+// ---------- MQTT (own task: a missing broker must never delay the LED) ----------
+WiFiClient mqNet;
+PubSubClient mqtt(mqNet);
+
+void mqPub(const String& t, const String& v) { mqtt.publish(t.c_str(), v.c_str(), true); }
+
+void mqDiscovery(const String& pre) {
+  String id = apName;
+  id.toLowerCase();
+  id.replace("-", "_");
+  String dev = ",\"avty_t\":\"" + pre + "/availability\",\"dev\":{\"ids\":[\"" + id + "\"],\"name\":\"Token LED\"}";
+  const char* key[] = {"state", "usage5", "usage7"};
+  const char* name[] = {"Claude state", "Claude usage 5 h", "Claude usage 7 d"};
+  for (int i = 0; i < 3; i++) {
+    String c = String("{\"name\":\"") + name[i] + "\",\"uniq_id\":\"" + id + "_" + key[i] + "\",\"stat_t\":\"" + pre + "/" + key[i] + "\"" +
+               (i ? ",\"unit_of_measurement\":\"%\"" : "") + dev + "}";
+    mqPub("homeassistant/sensor/" + id + "/" + key[i] + "/config", c);
+  }
+}
+
+void mqttTask(void*) {
+  uint32_t nextTry = 0, backoff = 5000;
+  String lastState, host, user, pass, pre;
+  int l5 = -2, l7 = -2;
+  uint16_t port = 1883;
+  for (;;) {
+    vTaskDelay(200 / portTICK_PERIOD_MS);
+    bool on;
+    xSemaphoreTake(cfgLock, portMAX_DELAY);
+    on = cfg.mq && cfg.mqHost.length() && netUp;
+    if (on && (mqReconf || !mqtt.connected())) {
+      host = cfg.mqHost; port = cfg.mqPort; user = cfg.mqUser; pass = cfg.mqPass; pre = cfg.mqTopic;
+    }
+    xSemaphoreGive(cfgLock);
+    if (mqReconf) { mqReconf = false; if (mqtt.connected()) mqtt.disconnect(); nextTry = 0; }
+    mqOk = mqtt.connected();
+    if (!on) { if (mqtt.connected()) mqtt.disconnect(); continue; }
+
+    if (!mqtt.connected()) {
+      if ((int32_t)(millis() - nextTry) < 0) continue;
+      mqNet.setTimeout(2);
+      mqtt.setBufferSize(512);
+      mqtt.setServer(host.c_str(), port);
+      bool ok = mqtt.connect(apName.c_str(), user.length() ? user.c_str() : nullptr, user.length() ? pass.c_str() : nullptr,
+                             (pre + "/availability").c_str(), 0, true, "offline");
+      if (!ok) { nextTry = millis() + backoff; backoff = min<uint32_t>(backoff * 2, 60000); continue; }
+      backoff = 5000;
+      mqPub(pre + "/availability", "online");
+      mqDiscovery(pre);
+      lastState = "";
+      l5 = l7 = -2;
+    }
+    mqtt.loop();
+    String st = stateName();
+    if (st != lastState) { mqPub(pre + "/state", st); lastState = st; }
+    bool fresh = useAt && millis() - useAt < USE_MS;
+    int a = fresh ? use5 : -1, b = fresh ? use7 : -1;
+    if (a != l5) { mqPub(pre + "/usage5", a < 0 ? "unknown" : String(a)); l5 = a; }
+    if (b != l7) { mqPub(pre + "/usage7", b < 0 ? "unknown" : String(b)); l7 = b; }
+  }
+}
+
 void setup() {
   setCpuFrequencyMhz(80);     // on battery: less power, enough for WiFi
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);   // never block on output when no USB host is attached
+  cfgLock = xSemaphoreCreateMutex();
   loadCfg();
+  loadStats();
   if (!pinOk(cfg.pin)) cfg.pin = LED_PIN;
   px.setPin(cfg.pin);
   px.updateLength(cfg.count);
   if (cfg.count && !px.numPixels()) cfg.count = 0;
   ob.begin();
   px.begin();
-  ob.setBrightness(cfg.bright);
-  px.setBrightness(cfg.bright);
+  appliedB = cfg.bright;
+  ob.setBrightness(appliedB);
+  px.setBrightness(appliedB);
   const uint32_t test[] = {px.Color(255, 0, 0), px.Color(0, 255, 0), px.Color(0, 0, 255), 0};
   for (uint32_t c : test) { led(c); delay(250); }
 
@@ -615,19 +1061,32 @@ void setup() {
   apName = "TokenLED-" + mac.substring(12, 14) + mac.substring(15);
 
   http.on("/", handleRoot);
+  http.on("/settings", handleSettings);
+  http.on("/system", handleSystem);
   http.on("/s", handleState);
   http.on("/save", HTTP_POST, handleSave);
   http.on("/test", HTTP_POST, handleTest);
+  http.on("/b", handleBlink);
   http.on("/wifi", HTTP_POST, handleWifi);
+  http.on("/update", HTTP_POST, handleUpdateDone, handleUpload);
   http.onNotFound(handleNotFound);
   http.begin();
   udp.begin(UDP_PORT);
   staStart();
+  xTaskCreate(mqttTask, "mqtt", 8192, nullptr, 1, nullptr);
 }
 
 void loop() {
   readSerial();
   network();
+  histTick();
   play();
-  delay(5);
+  static uint32_t slow = 0;
+  if (millis() - slow > 1000) {
+    slow = millis();
+    rollDay();
+    applyBright();
+    if (statsDirty && millis() - statsAt > STATS_MS) saveStats();
+  }
+  delay(1);
 }
