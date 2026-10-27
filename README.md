@@ -131,13 +131,18 @@ New protocol lines: `D 0` / `D 1` (turn finished / error), `U <5h%> <7d%>` (usag
 
 ## Enclosure (3D print, Fusion 360)
 
-`enclosure/TokenLED_Box/` is a Fusion 360 script that builds the box (parametric: change the numbers at the top and run it again).
-Fusion 360 > Utilities > Scripts and Add-Ins > Scripts > "+" > pick the `TokenLED_Box` folder > Run. It creates the bodies *Base* and *Lid*
-(and saves `base.stl` / `lid.stl` next to the script).
+`enclosure/TokenLED_Box/TokenLED_Box.py` is a Fusion 360 script that builds the box (concept "A", parametric: change the numbers
+at the top and run it again). Fusion 360 > Utilities > Scripts and Add-Ins > Scripts > "+" > pick the `TokenLED_Box` folder > Run.
+It creates the bodies *Base* and *Lid* and saves `base.stl` / `lid.stl` next to the script.
+`python enclosure/plate_p2s.py` turns them into print orientation (`*_P2S.stl`) and a plate file `TokenLED_Box_P2S.3mf`.
 
-- Flat wedge: 70 x 42 mm, 21 mm high at the front, 9 mm at the back; the lid is a sloped plate of constant thickness.
-- Front: USB-C opening for the controller and a light window for the 7-LED strip (0.8 mm skin = diffuser, print it in white/natural PLA).
-- Closed with 4 x **M2 x 5** screws into **M2 brass heat-set inserts** (3.2 mm holes, 4 mm long; press them in with a soldering iron).
-- 4 round recesses (10 mm) in the bottom for adhesive rubber feet.
-- Print the base flat on its bottom; lay the lid on its top face (slicer: "lay flat"), 0.2 mm layers, 3 perimeters.
-- Measure your board and strip first (board size, LED pitch: 144 LED/m = 6.94 mm) and adjust the parameters.
+- Wedge with a trapezoid footprint: 70 mm wide at the front, 36 at the back, 52 deep; 22 mm high at the front, 13 at the back.
+- Front: light window for the 7-LED strip (50 x 10 mm, standing on its edge behind the front wall); a 0.8 mm skin is the
+  diffuser, so print the base in **white or natural PLA**.
+- Back: the ESP32-C3 SuperMini Plus on two rails between fences, its USB-C end in the rear opening (11 x 5.2 mm).
+- Lid: sloped plate, 4 x **M2 x 5** screws into **M2 brass heat-set inserts** (3.2 mm holes, 4 mm deep; press them in with a
+  soldering iron). The screw posts are joined to the corners.
+- 4 round recesses (10 mm, 1 mm deep) in the bottom for adhesive rubber feet.
+- Printing (Bambu Lab P2S, PLA Basic, 0.2 mm Standard, 3 walls, 15 % infill, no supports): the base stands on its bottom,
+  the lid lies on its top face.
+- The board and strip sizes are assumptions (board 23 x 18 mm): measure yours and adjust the parameters.
