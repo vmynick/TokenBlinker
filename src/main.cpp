@@ -236,7 +236,8 @@ void startNtp() { configTzTime(cfg.tz.c_str(), "pool.ntp.org", "time.google.com"
 
 // Tokens per day (today first) for the last 7 days: out (text+thinking+tool), new input, cache read.
 struct Day { uint32_t out, in, cache; };
-Day days[7];
+#define DAYS 30
+Day days[DAYS];   // days[0] = today
 uint32_t dayId = 0;       // calendar day of days[0] (0 = clock not set yet)
 bool statsDirty = false;
 uint32_t statsAt = 0;
@@ -253,7 +254,8 @@ uint32_t civilDay(const struct tm& t) {   // days since 0000-03-01, continuous a
 void loadStats() {
   prefs.begin("stats", true);
   dayId = prefs.getUInt("day", 0);
-  if (prefs.getBytesLength("days") == sizeof(days)) prefs.getBytes("days", days, sizeof(days));
+  size_t dl = prefs.getBytesLength("days");
+  if (dl == sizeof(days) || dl == 7 * sizeof(Day)) prefs.getBytes("days", days, dl);   // older firmware kept 7 days
   hourId = prefs.getUInt("hour", 0);
   if (prefs.getBytesLength("hours") == sizeof(hours)) prefs.getBytes("hours", hours, sizeof(hours));
   prefs.end();
@@ -293,10 +295,10 @@ void rollDay() {
   uint32_t id = civilDay(tm);
   if (!dayId) { dayId = id; statsDirty = true; return; }
   if (id == dayId) return;
-  uint32_t d = id > dayId ? id - dayId : 7;
-  if (d >= 7) memset(days, 0, sizeof(days));
+  uint32_t d = id > dayId ? id - dayId : DAYS;
+  if (d >= DAYS) memset(days, 0, sizeof(days));
   else {
-    memmove(days + d, days, (7 - d) * sizeof(Day));
+    memmove(days + d, days, (DAYS - d) * sizeof(Day));
     memset(days, 0, d * sizeof(Day));
   }
   dayId = id;
@@ -421,6 +423,21 @@ void enqueue(char type, long n) {
   pending += n;
 }
 
+// ---------- Event log (RAM, newest first on the Live page) ----------
+enum { EV_BOOT, EV_START, EV_APPROVAL, EV_ANSWERED, EV_DONE, EV_ERROR, EV_U5, EV_U7 };
+struct Ev { uint8_t kind; uint16_t detail; uint32_t up; time_t wall; };
+#define EV_N 30
+Ev evs[EV_N];
+uint8_t evHead = 0, evCount = 0;
+
+void logEv(uint8_t kind, uint16_t detail = 0) {
+  evs[evHead] = {kind, detail, millis() / 1000, timeOk() ? time(nullptr) : 0};
+  evHead = (evHead + 1) % EV_N;
+  if (evCount < EV_N) evCount++;
+}
+
+int useLevel(int v) { return v >= 100 ? 3 : v >= 85 ? 2 : v >= 60 ? 1 : 0; }
+
 int typeIdx(char t) {
   const char* p = t ? strchr(TYPES, t) : nullptr;
   return p ? p - TYPES : 0;
@@ -435,6 +452,7 @@ void addTokens(char type, long n) {
   int i = typeIdx(type);
   type = TYPES[i];
   total[i] += n;
+  if (!lastTok || millis() - lastTok > 15000) logEv(EV_START);
   lastTok = millis();
   lastDone = 0;
   if (i != 4) hours[0] += n;
@@ -448,8 +466,12 @@ void addTokens(char type, long n) {
 }
 
 void setWaiting(bool on) {
-  if (!on) { waitUntil = 0; return; }
-  if (!waitUntil || (int32_t)(millis() - waitUntil) >= 0) { approvals++; waitStart = millis(); }
+  if (!on) {
+    if (waitUntil && (int32_t)(millis() - waitUntil) < 0) logEv(EV_ANSWERED);
+    waitUntil = 0;
+    return;
+  }
+  if (!waitUntil || (int32_t)(millis() - waitUntil) >= 0) { approvals++; waitStart = millis(); logEv(EV_APPROVAL); }
   waitUntil = millis() + WAIT_MS;
 }
 
@@ -557,12 +579,15 @@ void handleLine(char* s, bool usb) {
   else if (sscanf(s, "B %c %ld", &type, &n) == 2) enqueue(type, n);
   else if (sscanf(s, "A %ld", &n) == 1) setWaiting(n != 0);
   else if (sscanf(s, "D %ld", &n) == 1) {
-    waitUntil = 0;
+    setWaiting(false);
+    logEv(n ? EV_ERROR : EV_DONE);
     lastDone = n ? 2 : 1;
     (n ? doneErr : doneOk)++;
     if (cfg.doneSig) { sigErr = n != 0; sigPending = true; sigUntil = 0; }
   }
   else if (sscanf(s, "U %ld %ld", &n, &m) == 2) {
+    if (useLevel(n) > useLevel(use5)) logEv(EV_U5, n);
+    if (useLevel(m) > useLevel(use7)) logEv(EV_U7, m);
     use5 = n; use7 = m; useAt = millis();
     shown = 1;
   }
@@ -700,6 +725,10 @@ button{padding:8px 16px;margin:12px 8px 0 0;background:#333;color:#eee;border:1p
 table{width:100%;border-collapse:collapse}td,th{padding:3px 0}td+td,th+th{text-align:right;font-variant-numeric:tabular-nums}
 th{color:#888;font-weight:normal}
 small{color:#888}.ok{color:#6c6}
+details.sec{border:1px solid #333;border-radius:8px;padding:0 12px;margin:10px 0;background:#181818}
+details.sec>summary{cursor:pointer;padding:11px 0;font-weight:600;color:#ddd}
+details.sec[open]>summary{border-bottom:1px solid #333;margin-bottom:6px}
+details.sec>small:last-child{display:block;margin-bottom:10px}
 .g{display:grid;grid-template-columns:repeat(6,1fr);gap:4px;text-align:center;margin:12px 0}
 .l{width:30px;height:30px;border-radius:50%;margin:0 auto 6px;border:1px solid #333}
 .g small{display:block}.g b{font-size:12px}
@@ -785,6 +814,34 @@ const char* stateName() {
   return "idle";
 }
 
+String evRows() {
+  const char* text[] = {"Device started", "Claude started working", "Waiting for your approval", "Approval answered",
+                        "Finished", "Finished with an error", "5-hour usage reached ", "Weekly usage reached "};
+  String s;
+  for (int i = 0; i < evCount; i++) {
+    Ev& e = evs[(evHead + EV_N - 1 - i) % EV_N];
+    String when;
+    if (e.wall) {
+      struct tm tm;
+      localtime_r(&e.wall, &tm);
+      char b[12];
+      strftime(b, sizeof(b), "%H:%M:%S", &tm);
+      when = b;
+    } else {
+      when = String("up ") + e.up / 60 + " min";
+    }
+    String what = text[e.kind];
+    if (e.kind >= EV_U5) what += String(e.detail) + " %";
+    s += "<tr><td>" + what + "<td>" + when + "</tr>";
+  }
+  return s;
+}
+
+void handleLog() {
+  http.sendHeader("Cache-Control", "no-store");
+  http.send(200, "text/html; charset=utf-8", evRows());
+}
+
 void handleRoot() {
   uint32_t ago = (millis() - lastMsg) / 1000;
   String s = page(0);
@@ -854,6 +911,27 @@ void handleRoot() {
   s += "<tr><td><b>7 days</b><td>" + kfmt(sum.out) + "<td>" + kfmt(sum.in) + "<td>" + kfmt(sum.cache) + "</tr></table>";
   s += "<small>Kept in flash (saved every 5 min). Output = text + thinking + tool input.</small>";
 
+  s += "<h3>Last 30 days</h3><div style='display:flex;align-items:flex-end;gap:2px;height:60px'>";
+  uint32_t dmx = 1, dsum = 0;
+  for (int d = 0; d < DAYS; d++) { uint32_t v = days[d].out + days[d].in; dsum += v; if (v > dmx) dmx = v; }
+  for (int d = DAYS - 1; d >= 0; d--) {
+    String lab = String("-") + d + " d";
+    if (timeOk()) {
+      time_t t = now - d * 86400L;
+      struct tm tm;
+      localtime_r(&t, &tm);
+      char b[12];
+      strftime(b, sizeof(b), "%m-%d", &tm);
+      lab = b;
+    }
+    uint32_t v = days[d].out + days[d].in;
+    s += "<div title='" + lab + "  " + kfmt(v) + "' style='flex:1;background:" + (d == 0 ? "#9bf" : "#46a") +
+         ";min-height:1px;height:" + String(v * 100UL / dmx) + "%'></div>";
+  }
+  s += "</div><small>Output + new input per day, today on the right. 30 days: " + kfmt(dsum) + ".</small>";
+
+  s += "<h3>Recent events</h3><table id=ev>" + evRows() + "</table><small>Kept in RAM (cleared on restart).</small>";
+
   s += "<h3>Status</h3><table>";
   if (apOn) s += "<tr><td>Setup network</td><td>" + apName + "</td></tr>";
   if (netUp) {
@@ -880,14 +958,14 @@ void handleRoot() {
          "function fade(){const now=Date.now();for(let i=0;i<5;i++)"
          "l[i].style.opacity=.15+.85*Math.max(0,1-(now-lit[i])/400);"
          "l[5].style.opacity=wait?(Math.floor(now/500)%2?1:.35):.15;requestAnimationFrame(fade);}"
-         "setInterval(poll,100);fade();</script>");
+         "setInterval(poll,100);fade();setInterval(()=>{if(!document.hidden)fetch('/log').then(r=>r.text()).then(t=>{$('ev').innerHTML=t;}).catch(()=>{});},1500);</script>");
   http.send(200, "text/html; charset=utf-8", s);
 }
 
 void handleSettings() {
   String s = page(1);
   if (http.hasArg("saved")) s += "<p class=ok>Saved.</p>";
-  s += "<form method=post action=/save>";
+  s += "<form method=post action=/save><details class=sec open><summary>Flashes and signals</summary>";
   s += numField("out", dot(hex(0)) + dot(hex(1)) + dot(hex(2)) + "Text, thinking, tool: tokens per flash", cfg.out, 0, 60000);
   s += numField("in", dot(hex(3)) + "New input: tokens per flash", cfg.in, 0, 60000);
   s += numField("cache", dot(hex(4)) + "Cache read: tokens per flash", cfg.cache, 0, 60000);
@@ -898,7 +976,7 @@ void handleSettings() {
   s += checkField("done", "Signal when Claude finishes (green) or fails (red)", cfg.doneSig);
   s += numField("remind", "Approval blink gets faster after (s, 0 = off)", cfg.remind, 0, 3600);
 
-  s += "<h3>LEDs</h3>";
+  s += "</details><details class=sec><summary>LEDs and colours</summary>";
   s += selField("onb", "Onboard LED (GPIO8)", cfg.onb, {"mirror everything", "status + approval only", "off"});
   s += "<label><span>External strip: LEDs</span><input type=number name=count min=0 max=65535 list=cnt value=" +
        String(cfg.count) + "></label><datalist id=cnt><option>0<option>1<option>2<option>5<option>6<option>10<option>50<option>100</datalist>";
@@ -911,12 +989,12 @@ void handleSettings() {
        "<b>all</b> or 0 = every LED, empty = auto: with 5+ LEDs every type has its own LED (approval: the 6th), "
        "otherwise all LEDs flash together. Several types may share LEDs.</small>";
 
-  s += "<h3>Strip display</h3>";
+  s += "</details><details class=sec><summary>Strip display</summary>";
   s += checkField("hist", "History: flashes run along the strip like a running light", cfg.hist);
   s += selField("meter", "Usage bar (dim, needs 2+ LEDs)", cfg.meter, {"off", "5-hour limit", "weekly limit"});
   s += "<small>The usage bar is not shown while the history is on.</small>";
 
-  s += "<h3>Night</h3>";
+  s += "</details><details class=sec><summary>Night and time</summary>";
   s += checkField("night", "Dim at night", cfg.night);
   s += numField("nfrom", "From (hour)", cfg.nFrom, 0, 23);
   s += numField("nto", "To (hour)", cfg.nTo, 0, 23);
@@ -924,7 +1002,7 @@ void handleSettings() {
   s += tzField(cfg.tz);
   s += String("<small>Time from the internet (NTP)") + (timeOk() ? ", clock is set." : ", clock not set yet.") + "</small>";
 
-  s += "<h3>MQTT / Home Assistant</h3>";
+  s += "</details><details class=sec><summary>MQTT / Home Assistant</summary>";
   s += checkField("mq", "Publish the state over MQTT", cfg.mq);
   s += textField("mqhost", "Broker", cfg.mqHost, "text", "192.168.0.10");
   s += numField("mqport", "Port", cfg.mqPort, 1, 65535);
@@ -934,7 +1012,11 @@ void handleSettings() {
   s += "<small>Topics: <b>prefix/state</b> (idle, working, approval, done, error), <b>prefix/usage5</b>, <b>prefix/usage7</b>; "
        "Home Assistant finds the sensors by itself (MQTT discovery). A missing broker never affects the LED.</small>";
 
-  s += "<br><button>Save</button></form><form method=post action=/test><button>Colour test</button></form>";
+  s += "</details><button>Save</button></form><form method=post action=/test><button>Colour test</button></form>";
+  s += F("<script>const d=document.querySelectorAll('details.sec');let o=[];"
+         "try{o=JSON.parse(localStorage.getItem('open')||'null')||[];}catch(e){}"
+         "d.forEach((e,i)=>{if(o.length)e.open=!!o[i];e.addEventListener('toggle',()=>{"
+         "try{localStorage.setItem('open',JSON.stringify([...d].map(x=>x.open)));}catch(e){}});});</script>");
   http.send(200, "text/html; charset=utf-8", s);
 }
 
@@ -1264,6 +1346,7 @@ void setup() {
   http.on("/settings", handleSettings);
   http.on("/system", handleSystem);
   http.on("/s", handleState);
+  http.on("/log", handleLog);
   http.on("/save", HTTP_POST, handleSave);
   http.on("/test", HTTP_POST, handleTest);
   http.on("/b", handleBlink);
@@ -1275,6 +1358,7 @@ void setup() {
   http.begin();
   udp.begin(UDP_PORT);
   staStart();
+  logEv(EV_BOOT);
   xTaskCreate(mqttTask, "mqtt", 8192, nullptr, 1, nullptr);
 }
 

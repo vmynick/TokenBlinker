@@ -119,4 +119,8 @@ USB only: `W <ssid>\t<password>`, `?` → `IP <address>` / `NOWIFI`.
 - **BOOT button (GPIO9):** short press = quiet mode (night brightness) until pressed again, long press (1.5 s) = reset the live counters.
 - **Backup:** System page → download the settings as JSON (`/config.json`, no WiFi or MQTT password) and restore them from a file.
 
+- **30-day chart** on the Live page (output + new input per day, 7-day table kept); the older 7-day data is carried over.
+- **Recent events** on the Live page (updates live): started working, approval asked/answered, finished/error, usage reaching 60/85/100 %.
+- **Settings in collapsible sections** (flashes, LEDs and colours, strip display, night and time, MQTT); the browser remembers which are open.
+
 New protocol lines: `D 0` / `D 1` (turn finished / error), `U <5h%> <7d%>` (usage, -1 = unknown).
