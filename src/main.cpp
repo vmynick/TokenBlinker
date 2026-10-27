@@ -51,7 +51,7 @@ char curType = 0;
 uint32_t shown = 1;   // utoljára kiírt szín; 1 = még semmi
 
 const char TYPES[] = "tkjir";
-uint32_t rem[5], total[5];
+uint32_t rem[5], total[5], flashes[5];
 
 // ---------- Beállítások (webes felület, flash) ----------
 struct Cfg { uint16_t out, in, cache; uint8_t bright; bool glow, saver; } cfg;
@@ -163,6 +163,7 @@ void play() {
   Item& it = q[qHead];
   curType = it.type;
   led(color(curType));
+  flashes[typeIdx(curType)]++;
   if (--it.n == 0) { qHead = (qHead + 1) % QUEUE_LEN; qCount--; }
   pending--;
   state = ON; until = now + (pending > 30 ? 20 : 35);
@@ -310,7 +311,10 @@ button{padding:8px 16px;margin:12px 8px 0 0;background:#333;color:#eee;border:1p
 .box{border:1px solid #a80;border-radius:8px;padding:4px 12px 12px;margin-bottom:16px}
 summary{cursor:pointer;color:#999;margin-top:24px}
 table{width:100%;border-collapse:collapse}td{padding:3px 0}td+td{text-align:right;font-variant-numeric:tabular-nums}
-small{color:#888}</style><h2>Token LED</h2>)";
+small{color:#888}
+.g{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;text-align:center;margin:12px 0}
+.l{width:34px;height:34px;border-radius:50%;margin:0 auto 6px;border:1px solid #333}
+.g small{display:block}</style><h2>Token LED</h2>)";
 
 String dot(const char* c) { return String("<i class=d style=background:") + c + "></i>"; }
 
@@ -333,6 +337,13 @@ void handleRoot() {
   uint32_t ago = (millis() - lastMsg) / 1000;
   String s = FPSTR(PAGE_HEAD);
   if (apOn) s += "<div class=box><h3>WiFi beállítása</h3>" + wifiForm() + "</div>";
+  static const char* names[] = {"Szöveg", "Thinking", "Tool", "Új bemenet", "Cache"};
+  static const char* cols[] = {"#0bf", "#90f", "#0f4", "#f60", "#33f"};
+  s += "<div class=g>";
+  for (int i = 0; i < 5; i++)
+    s += String("<div><div class=l id=l") + i + " style=background:" + cols[i] + ";opacity:.15></div><b>" + names[i] +
+         "</b><small id=n" + i + ">" + total[i] + "</small><small id=f" + i + ">" + flashes[i] + " villanás</small></div>";
+  s += "</div>";
   s += "<form method=post action=/save>";
   s += numField("out", dot("#0bf") + dot("#90f") + dot("#0f4") + "Szöveg, thinking, tool: token / villanás", cfg.out, 0, 60000);
   s += numField("in", dot("#f60") + "Új bemenet: token / villanás", cfg.in, 0, 60000);
@@ -352,12 +363,31 @@ void handleRoot() {
   s += "<tr><td>Üzemidő</td><td>" + String(millis() / 60000) + " perc</td></tr>";
   s += "<tr><td>Utolsó üzenet a PC-ről</td><td>" + (lastMsg ? String(ago) + " s" : String("még nem jött")) + "</td></tr>";
   s += "<tr><td>Villanás a sorban</td><td>" + String(pending) + "</td></tr>";
-  const char* names[] = {"Szöveg", "Thinking", "Tool input", "Új bemenet", "Cache olvasás"};
-  for (int i = 0; i < 5; i++) s += String("<tr><td>") + names[i] + " (bekapcsolás óta)</td><td>" + total[i] + "</td></tr>";
-  s += "</table>";
+  s += "</table><small>Tokenszámok és villanások a bekapcsolás óta.</small>";
   if (!apOn) s += "<details><summary>WiFi-hálózat módosítása</summary>" + wifiForm() +
                   "<small>Ha az új hálózatra 30 s alatt nem csatlakozik, beállító hálózatot indít: " + apName + "</small></details>";
+  s += F("<script>const n=[],f=[],l=[],lit=[];"
+         "for(let i=0;i<5;i++){n[i]=document.getElementById('n'+i);f[i]=document.getElementById('f'+i);"
+         "l[i]=document.getElementById('l'+i);lit[i]=0;}"
+         "let last=null;"
+         "function poll(){if(document.hidden)return;fetch('/s').then(r=>r.json()).then(s=>{"
+         "for(let i=0;i<5;i++){n[i].textContent=s.t[i];f[i].textContent=s.f[i]+' villanás';"
+         "if(last&&s.f[i]!=last[i])lit[i]=Date.now();}last=s.f;}).catch(()=>{});}"
+         "function fade(){const now=Date.now();for(let i=0;i<5;i++)"
+         "l[i].style.opacity=.15+.85*Math.max(0,1-(now-lit[i])/400);requestAnimationFrame(fade);}"
+         "setInterval(poll,200);fade();</script>");
   http.send(200, "text/html; charset=utf-8", s);
+}
+
+// Élő állapot a virtuális LED-eknek: tokenek és villanások típusonként (t,k,j,i,r sorrend).
+void handleState() {
+  String s = "{\"t\":[";
+  for (int i = 0; i < 5; i++) s += String(i ? "," : "") + total[i];
+  s += "],\"f\":[";
+  for (int i = 0; i < 5; i++) s += String(i ? "," : "") + flashes[i];
+  s += "]}";
+  http.sendHeader("Cache-Control", "no-store");
+  http.send(200, "application/json", s);
 }
 
 void redirectHome() {
@@ -425,6 +455,7 @@ void setup() {
   apName = "TokenLED-" + mac.substring(12, 14) + mac.substring(15);
 
   http.on("/", handleRoot);
+  http.on("/s", handleState);
   http.on("/save", HTTP_POST, handleSave);
   http.on("/test", HTTP_POST, handleTest);
   http.on("/wifi", HTTP_POST, handleWifi);
