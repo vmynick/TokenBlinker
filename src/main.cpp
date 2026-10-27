@@ -739,6 +739,32 @@ String selField(const char* name, const char* label, int cur, std::initializer_l
   return s + "</select></label>";
 }
 
+// Time zones for the drop-down: label and POSIX TZ string (the value that is stored and used).
+struct Zone { const char* name; const char* tz; };
+const Zone ZONES[] = {
+  {"Honolulu", "HST10"}, {"Anchorage", "AKST9AKDT,M3.2.0,M11.1.0"}, {"Los Angeles / Vancouver", "PST8PDT,M3.2.0,M11.1.0"},
+  {"Denver", "MST7MDT,M3.2.0,M11.1.0"}, {"Phoenix", "MST7"}, {"Chicago / Mexico City", "CST6CDT,M3.2.0,M11.1.0"},
+  {"New York / Toronto", "EST5EDT,M3.2.0,M11.1.0"}, {"São Paulo / Buenos Aires", "<-03>3"},
+  {"UTC", "UTC0"}, {"London / Dublin", "GMT0BST,M3.5.0/1,M10.5.0"}, {"Lisbon", "WET0WEST,M3.5.0/1,M10.5.0"},
+  {"Budapest / Berlin / Paris / Rome / Vienna / Prague / Warsaw", "CET-1CEST,M3.5.0,M10.5.0/3"},
+  {"Athens / Helsinki / Kyiv / Bucharest", "EET-2EEST,M3.5.0/3,M10.5.0/4"}, {"Istanbul / Moscow", "<+03>-3"},
+  {"Dubai", "<+04>-4"}, {"Mumbai / Delhi", "IST-5:30"}, {"Bangkok / Jakarta", "<+07>-7"},
+  {"Beijing / Singapore / Perth", "CST-8"}, {"Tokyo / Seoul", "JST-9"},
+  {"Sydney / Melbourne", "AEST-10AEDT,M10.1.0,M4.1.0/3"}, {"Auckland", "NZST-12NZDT,M9.5.0,M4.1.0/3"},
+};
+
+String tzField(const String& cur) {
+  String s = "<label><span>Time zone</span><select name=tz class=w style=width:190px>";
+  bool known = false;
+  for (const Zone& z : ZONES) {
+    bool sel = cur == z.tz;
+    known |= sel;
+    s += String("<option value=\"") + esc(z.tz) + "\"" + (sel ? " selected" : "") + ">" + z.name + "</option>";
+  }
+  if (!known) s += "<option value=\"" + esc(cur) + "\" selected>Custom: " + esc(cur) + "</option>";
+  return s + "</select></label>";
+}
+
 String wifiForm() {
   return "<form method=post action=/wifi><label><span>Network (2.4 GHz)</span><input name=ssid list=ssids required value=\"" +
          esc(savedSsid) + "\"></label><datalist id=ssids>" + ssidOptions + "</datalist>"
@@ -895,7 +921,7 @@ void handleSettings() {
   s += numField("nfrom", "From (hour)", cfg.nFrom, 0, 23);
   s += numField("nto", "To (hour)", cfg.nTo, 0, 23);
   s += numField("nbr", "Night brightness (0 = off)", cfg.nBright, 0, 255);
-  s += textField("tz", "Time zone (POSIX)", cfg.tz);
+  s += tzField(cfg.tz);
   s += String("<small>Time from the internet (NTP)") + (timeOk() ? ", clock is set." : ", clock not set yet.") + "</small>";
 
   s += "<h3>MQTT / Home Assistant</h3>";
