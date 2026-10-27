@@ -1,0 +1,10 @@
+{
+  "autodeskProduct": "Fusion",
+  "type": "script",
+  "author": "",
+  "description": {
+    "": "Token LED enclosure: flat wedge box, USB-C and 7-LED light window at the front, M2 heat-set inserts, rubber feet"
+  },
+  "supportedOS": "windows|mac",
+  "editEnabled": true
+}

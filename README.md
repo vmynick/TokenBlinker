@@ -128,3 +128,16 @@ USB only: `W <ssid>\t<password>`, `?` → `IP <address>` / `NOWIFI`.
 - The **System** page is sectioned too (WiFi, firmware update, backup, device).
 
 New protocol lines: `D 0` / `D 1` (turn finished / error), `U <5h%> <7d%>` (usage, -1 = unknown).
+
+## Enclosure (3D print, Fusion 360)
+
+`enclosure/TokenLED_Box/` is a Fusion 360 script that builds the box (parametric: change the numbers at the top and run it again).
+Fusion 360 > Utilities > Scripts and Add-Ins > Scripts > "+" > pick the `TokenLED_Box` folder > Run. It creates the bodies *Base* and *Lid*
+(and saves `base.stl` / `lid.stl` next to the script).
+
+- Flat wedge: 70 x 42 mm, 21 mm high at the front, 9 mm at the back; the lid is a sloped plate of constant thickness.
+- Front: USB-C opening for the controller and a light window for the 7-LED strip (0.8 mm skin = diffuser, print it in white/natural PLA).
+- Closed with 4 x **M2 x 5** screws into **M2 brass heat-set inserts** (3.2 mm holes, 4 mm long; press them in with a soldering iron).
+- 4 round recesses (10 mm) in the bottom for adhesive rubber feet.
+- Print the base flat on its bottom; lay the lid on its top face (slicer: "lay flat"), 0.2 mm layers, 3 perimeters.
+- Measure your board and strip first (board size, LED pitch: 144 LED/m = 6.94 mm) and adjust the parameters.
