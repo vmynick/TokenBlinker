@@ -1,12 +1,13 @@
-// Claude token LED — indító a VS Code Claude-bővítményhez (claudeCode.claudeProcessWrapper).
-// A bővítmény így hívja: token_tap.exe <claude.exe> <paraméterek...>
-// Változatlanul elindítja a claude.exe-t, a kimenetét bájtra pontosan továbbadja, közben a
-// stream_event sorokból (élő tokenfolyam) UDP-n szól a LED-nek. Nincs proxy és háttérfolyamat:
-// ha a LED vagy a hálózat nem elérhető, a Claude ugyanúgy működik.
+// Claude token LED — launcher for the VS Code Claude extension (claudeCode.claudeProcessWrapper).
+// The extension calls it as: token_tap.exe <claude.exe> <arguments...>
+// It starts claude.exe unchanged, passes its output through byte for byte, and meanwhile reads the
+// stream_event lines (the live token stream) and tells the LED over UDP. It also notices when Claude
+// asks the user for approval (control_request / can_use_tool). No proxy, no background process: if the
+// LED or the network is unreachable, Claude works exactly the same.
 //
-// Fordítás (a .NET Framework minden Windowson megvan):
+// Build (the .NET Framework is on every Windows):
 //   C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /optimize /r:System.Web.Extensions.dll token_tap.cs
-// LED címe: TOKENLED_HOST környezeti változó, alapból tokenled.local (UDP 4210, "T <típus> <token>")
+// LED address: TOKENLED_HOST environment variable, default tokenled.local (UDP 4210, "T <type> <tokens>", "A 1")
 
 using System;
 using System.Collections.Generic;
@@ -22,19 +23,19 @@ using System.Web.Script.Serialization;
 static class TokenTap
 {
     const int LED_PORT = 4210;
-    const int MAX_LINE = 65536;           // a stream_event sorok kicsik; a hosszabbakat (tool-eredmény) nem bontja ki
-    const int CHARS_PER_TOKEN = 4;        // élő becslés; az üzenet végén a valódi output_tokens pótolja a különbséget
+    const int MAX_LINE = 65536;           // stream_event lines are small; longer ones (tool results) are not parsed
+    const int CHARS_PER_TOKEN = 4;        // live estimate; the real output_tokens at the end of a message fixes the difference
 
-    // ---------- Indítás és továbbítás ----------
+    // ---------- Start and pass-through ----------
     static int Main()
     {
         string cl = Environment.CommandLine;
         int i = 0;
-        NextToken(cl, ref i);                // saját magunk
-        string exe = NextToken(cl, ref i);   // a bővítmény claude.exe-je; a többi paraméter érintetlenül megy tovább
+        NextToken(cl, ref i);                // ourselves
+        string exe = NextToken(cl, ref i);   // the extension's claude.exe; the other arguments go on untouched
         if (exe.Length == 0)
         {
-            Console.Error.WriteLine("token_tap: hiányzik a claude.exe útvonala");
+            Console.Error.WriteLine("token_tap: path of claude.exe is missing");
             return 2;
         }
 
@@ -49,14 +50,15 @@ static class TokenTap
         {
             dst.Write(buf, 0, n);
             dst.Flush();
-            try { Feed(buf, n); } catch { }   // a LED-figyelés hibája sosem érintheti a Claude-ot
+            try { Feed(buf, n); } catch { }   // a failure of the LED tap must never affect Claude
         }
         p.WaitForExit();
-        if (sender != null) Thread.Sleep(150);   // az utolsó tokenek még kimenjenek
+        waiting = false;
+        if (sender != null) Thread.Sleep(150);   // let the last packets out
         return p.ExitCode;
     }
 
-    // Windows parancssori token (a program neve és egy útvonal: idézőjelben vagy szóközig).
+    // One Windows command-line token (the program name and a path: quoted, or up to the next space).
     static string NextToken(string s, ref int i)
     {
         while (i < s.Length && char.IsWhiteSpace(s[i])) i++;
@@ -79,7 +81,7 @@ static class TokenTap
         return tok;
     }
 
-    // ---------- A claude.exe ne éljen túl minket (a libuv is így csinálja) ----------
+    // ---------- claude.exe must not outlive us (libuv does the same) ----------
     [StructLayout(LayoutKind.Sequential)]
     struct BasicLimits
     {
@@ -106,25 +108,27 @@ static class TokenTap
     [DllImport("kernel32.dll")]
     static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
 
-    static IntPtr job;   // a folyamat végéig nyitva marad; bezáródásakor a claude.exe is leáll
+    static IntPtr job;   // stays open until the process ends; closing it stops claude.exe too
 
     static void KillWithUs(Process p)
     {
         job = CreateJobObject(IntPtr.Zero, null);
         var info = new ExtendedLimits();
-        info.Basic.LimitFlags = 0x2000 | 0x1000;   // KILL_ON_JOB_CLOSE | SILENT_BREAKAWAY_OK (a claude gyerekei szabadok)
+        info.Basic.LimitFlags = 0x2000 | 0x1000;   // KILL_ON_JOB_CLOSE | SILENT_BREAKAWAY_OK (claude's children stay free)
         SetInformationJobObject(job, 9, ref info, Marshal.SizeOf(typeof(ExtendedLimits)));
         AssignProcessToJobObject(job, p.Handle);
     }
 
-    // ---------- Élő tokenfolyam a kimenetből ----------
-    // Egy üzenet karakterei és az ezekből már elküldött tokenek típusonként (T/ET: szöveg, K/EK: thinking, J/EJ: tool).
+    // ---------- Live token stream from the output ----------
+    // Characters of one message and the tokens already sent for them, per type
+    // (T/ET: text, K/EK: thinking, J/EJ: tool input).
     class Msg { public long T, K, J, ET, EK, EJ, Sent; public bool Thinking; }
 
     static readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
     static readonly MemoryStream line = new MemoryStream();
-    static readonly Dictionary<string, Msg> msgs = new Dictionary<string, Msg>();   // fő szál és subagentek külön
+    static readonly Dictionary<string, Msg> msgs = new Dictionary<string, Msg>();   // main thread and subagents separately
     static bool lineTooLong;
+    static volatile bool waiting;   // Claude waits for the user's approval
 
     static void Feed(byte[] b, int n)
     {
@@ -132,7 +136,7 @@ static class TokenTap
         {
             if (b[k] == (byte)'\n')
             {
-                if (!lineTooLong) Line(Encoding.UTF8.GetString(line.GetBuffer(), 0, (int)line.Length));
+                Line(Encoding.UTF8.GetString(line.GetBuffer(), 0, (int)line.Length), !lineTooLong);
                 line.SetLength(0);
                 lineTooLong = false;
             }
@@ -160,9 +164,22 @@ static class TokenTap
         return s == null ? 0 : s.Length;
     }
 
-    static void Line(string s)
+    static void Line(string s, bool complete)
     {
-        if (s.IndexOf("\"stream_event\"", StringComparison.Ordinal) < 0) return;
+        // Approval: Claude asks (control_request / can_use_tool); anything it prints afterwards means it was answered.
+        string head = s.Length > 300 ? s.Substring(0, 300) : s;
+        if (head.IndexOf("\"control_request\"", StringComparison.Ordinal) >= 0 &&
+            head.IndexOf("\"can_use_tool\"", StringComparison.Ordinal) >= 0)
+        {
+            SetWaiting(true);
+            return;
+        }
+        if (head.IndexOf("\"type\":\"user\"", StringComparison.Ordinal) >= 0 ||
+            head.IndexOf("\"type\":\"result\"", StringComparison.Ordinal) >= 0 ||
+            head.IndexOf("\"control_cancel_request\"", StringComparison.Ordinal) >= 0)
+            waiting = false;
+
+        if (!complete || s.IndexOf("\"stream_event\"", StringComparison.Ordinal) < 0) return;
         object o = json.DeserializeObject(s);
         if ((Get(o, "type") as string) != "stream_event") return;
         object ev = Get(o, "event");
@@ -173,6 +190,7 @@ static class TokenTap
         switch (Get(ev, "type") as string)
         {
             case "message_start":
+                waiting = false;
                 msgs[key] = m = new Msg();
                 object u = Get(Get(ev, "message"), "usage");
                 Add('i', Num(u, "input_tokens") + Num(u, "cache_creation_input_tokens"));
@@ -191,7 +209,7 @@ static class TokenTap
                     case "input_json_delta": m.J += Len(d, "partial_json"); m.EJ += Emit(m, 'j', m.J, m.EJ); break;
                 }
                 break;
-            case "message_delta":   // a valódi output_tokens: a becslésből hiányzót pótolja
+            case "message_delta":   // the real output_tokens: tops up what the estimate missed
                 object fu = Get(ev, "usage");
                 long outTok = Num(fu, "output_tokens");
                 object th = Get(Get(fu, "output_tokens_details"), "thinking_tokens");
@@ -207,7 +225,7 @@ static class TokenTap
         }
     }
 
-    // A típus eddigi karaktereiből becsült tokenek közül a még el nem küldötteket küldi; visszaadja, mennyit.
+    // Sends the estimated tokens of this type that were not sent yet; returns how many.
     static long Emit(Msg m, char type, long chars, long done)
     {
         long tokens = chars / CHARS_PER_TOKEN - done;
@@ -225,10 +243,17 @@ static class TokenTap
         return missing;
     }
 
-    // ---------- Küldés a LED-nek (külön szálon, hogy a továbbítást semmi ne lassítsa) ----------
+    // ---------- Sending to the LED (own thread, so nothing slows the pass-through down) ----------
     static readonly object gate = new object();
     static readonly Dictionary<char, long> pending = new Dictionary<char, long>();
     static Thread sender;
+
+    static void EnsureSender()
+    {
+        if (sender != null) return;
+        sender = new Thread(Sender) { IsBackground = true };
+        sender.Start();
+    }
 
     static void Add(char type, long n)
     {
@@ -239,11 +264,13 @@ static class TokenTap
             pending.TryGetValue(type, out v);
             pending[type] = v + n;
         }
-        if (sender == null)
-        {
-            sender = new Thread(Sender) { IsBackground = true };
-            sender.Start();
-        }
+        EnsureSender();
+    }
+
+    static void SetWaiting(bool on)
+    {
+        waiting = on;
+        if (on) EnsureSender();
     }
 
     static void Sender()
@@ -251,13 +278,14 @@ static class TokenTap
         string host = Environment.GetEnvironmentVariable("TOKENLED_HOST") ?? "tokenled.local";
         var udp = new UdpClient();
         IPEndPoint ep = null;
-        DateTime nextResolve = DateTime.MinValue, nextPing = DateTime.MinValue;
+        DateTime nextResolve = DateTime.MinValue, nextPing = DateTime.MinValue, nextWait = DateTime.MinValue;
+        bool sentWaiting = false;
         while (true)
         {
             DateTime now = DateTime.UtcNow;
             if (now >= nextResolve)
             {
-                try   // sikertelen feloldásnál a legutóbbi címet megtartja
+                try   // if resolving fails, the last address is kept
                 {
                     foreach (IPAddress a in Dns.GetHostAddresses(host))
                         if (a.AddressFamily == AddressFamily.InterNetwork) { ep = new IPEndPoint(a, LED_PORT); break; }
@@ -274,6 +302,10 @@ static class TokenTap
                     pending.Clear();
                 }
                 if (now >= nextPing) { sb.Append("P\n"); nextPing = now.AddSeconds(2); }
+                bool w = waiting;
+                if (w && now >= nextWait) { sb.Append("A 1\n"); nextWait = now.AddSeconds(1); }   // repeated: the LED expires it
+                if (!w && sentWaiting) sb.Append("A 0\n");
+                sentWaiting = w;
                 if (sb.Length > 0)
                 {
                     try { byte[] data = Encoding.ASCII.GetBytes(sb.ToString()); udp.Send(data, data.Length, ep); }

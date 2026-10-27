@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Token-LED segédprogram: WiFi-beállítás, színteszt, és napló alapú számolás a terminálos munkamenetekhez.
-A VS Code-os Claude élőben, a token_tap.exe-n keresztül villogtat (README); ez a program ahhoz nem kell.
+Token LED helper: WiFi setup, colour test, and log-based counting for terminal sessions.
+The VS Code Claude flashes live through token_tap.exe (see README); this program is not needed for that.
 
-  python token_blinker.py --wifi       # egyszer, USB-n: WiFi-név és jelszó beírása az ESP-be
-  python token_blinker.py --test 3     # típusonként 3 villanás, a színek ellenőrzéséhez
-  python token_blinker.py              # terminálos Claude Code: a naplókból (~/.claude/projects) számol,
-                                       # válaszonként; a VS Code-os munkameneteket kihagyja (azokat a token_tap küldi)
-  --host 192.168.0.42                  # ha a tokenled.local nem oldható fel
-  --usb [COM9]                         # WiFi helyett USB soros
+  python token_blinker.py --wifi       # over USB: type the WiFi name and password into the ESP
+  python token_blinker.py --test 3     # 3 flashes per type, to check the colours
+  python token_blinker.py              # terminal Claude Code: counts from the logs (~/.claude/projects),
+                                       # per response; skips VS Code sessions (token_tap sends those)
+  --host 192.168.0.42                  # if tokenled.local does not resolve
+  --usb [COM9]                         # USB serial instead of WiFi
 
-A PC nyers tokenszámokat küld ("T <típus> <token>"); hány token egy villanás, a LED webes felületén
-állítható: http://tokenled.local
-A --wifi és a --usb a pyserial csomagot igényli (pip install pyserial), a WiFi-s mód csak stdlib.
+The PC sends raw token counts ("T <type> <tokens>"); how many tokens make one flash is set on the
+LED's web page: http://tokenled.local
+--wifi and --usb need pyserial (pip install pyserial); the WiFi mode uses the standard library only.
 """
 import argparse, getpass, json, os, socket, sys, threading, time
 from pathlib import Path
@@ -30,7 +30,7 @@ ESPRESSIF_VID = 0x303A
 SKIP_ENTRYPOINT = b'"entrypoint":"claude-vscode"'
 
 
-# ---------- LED WiFi-n (UDP) ----------
+# ---------- LED over WiFi (UDP) ----------
 class UdpLed:
     def __init__(self, host):
         self.host, self.addr = host, None
@@ -45,9 +45,9 @@ class UdpLed:
                 if addr != self.addr:
                     print(f"LED: {self.host} = {addr[0]}")
                 self.addr, warned = addr, False
-            except OSError:   # a legutóbbi címet megtartja, az mDNS alvó ESP-vel néha akadozik
+            except OSError:   # keeps the last address; mDNS sometimes fails with a sleeping ESP
                 if not self.addr and not warned:
-                    print(f"{self.host} nem található; be van kapcsolva és a WiFi-n van? (vagy --host <IP>)")
+                    print(f"{self.host} not found; is it powered and on the WiFi? (or use --host <IP>)")
                     warned = True
             time.sleep(30 if self.addr else 5)
 
@@ -59,10 +59,10 @@ class UdpLed:
                 pass
 
 
-# ---------- LED USB-n (soros) ----------
+# ---------- LED over USB (serial) ----------
 def need_serial():
     if serial is None:
-        sys.exit("Ehhez kell a pyserial: pip install pyserial")
+        sys.exit("This needs pyserial: pip install pyserial")
 
 
 def find_port():
@@ -75,7 +75,7 @@ def find_port():
 def open_port(name):
     s = serial.Serial()
     s.port, s.baudrate, s.write_timeout = name, 115200, 1
-    s.dtr = s.rts = False   # a natív USB-n a DTR/RTS reseteli vagy bootloaderbe teszi a C3-at
+    s.dtr = s.rts = False   # on native USB, DTR/RTS would reset the C3 or put it into the bootloader
     s.open()
     return s
 
@@ -95,14 +95,14 @@ class SerialLed:
                 return
             try:
                 self.ser = open_port(name)
-                print(f"LED csatlakoztatva: {name}")
+                print(f"LED connected: {name}")
             except serial.SerialException as e:
-                print(f"{name} nem nyitható meg ({e}); fut a PlatformIO soros monitor?")
+                print(f"cannot open {name} ({e}); is the PlatformIO serial monitor running?")
                 return
         try:
             self.ser.write(line.encode())
         except (serial.SerialException, OSError):
-            print("LED leválasztva, újracsatlakozás...")
+            print("LED disconnected, reconnecting...")
             self.ser.close()
             self.ser = None
 
@@ -111,14 +111,14 @@ def setup_wifi(port):
     need_serial()
     name = port or find_port()
     if not name:
-        sys.exit("Nem találok USB-re dugott Espressif eszközt; add meg: --wifi --usb COMx")
-    ssid = input("WiFi-név (SSID, 2,4 GHz-es hálózat): ").strip()
-    pw = getpass.getpass("Jelszó (nem látszik gépelés közben): ")
+        sys.exit("No Espressif device found on USB; give the port: --wifi --usb COMx")
+    ssid = input("WiFi name (SSID, 2.4 GHz network): ").strip()
+    pw = getpass.getpass("Password (not shown while typing): ")
     with open_port(name) as s:
         s.timeout = 0.5
         s.reset_input_buffer()
         s.write(f"W {ssid}\t{pw}\n".encode())
-        print("Csatlakozás...")
+        print("Connecting...")
         end = last_ask = time.monotonic()
         end += 25
         while time.monotonic() < end:
@@ -127,15 +127,15 @@ def setup_wifi(port):
                 s.write(b"?\n")
             line = s.readline().decode(errors="replace").strip()
             if line.startswith("IP "):
-                print(f"Kész: a LED a WiFi-n van, IP {line[3:]} — beállítások: http://tokenled.local")
+                print(f"Done: the LED is on the WiFi, IP {line[3:]} - settings: http://tokenled.local")
                 return
-    sys.exit("25 s alatt nem csatlakozott. Jó a jelszó, és 2,4 GHz-es a hálózat? (--wifi újra)")
+    sys.exit("Did not connect within 25 s. Is the password right and the network 2.4 GHz? (run --wifi again)")
 
 
-# ---------- Claude Code naplók (terminálos munkamenetek) ----------
-offsets = {}    # fájl -> eddig feldolgozott bájt
-partial = {}    # fájl -> befejezetlen utolsó sor
-seen = {}       # már beszámolt message.id-k (egy üzenet több sorban, ugyanazzal a usage-dzsel)
+# ---------- Claude Code logs (terminal sessions) ----------
+offsets = {}    # file -> bytes processed so far
+partial = {}    # file -> unfinished last line
+seen = {}       # message ids already counted (one message spans several lines with the same usage)
 
 
 def parse(line, got):
@@ -162,7 +162,7 @@ def parse(line, got):
 
 
 def scan(first):
-    """Új tokenek a legutóbbi hívás óta. Induláskor a meglévő naplók végére ugrik."""
+    """New tokens since the last call. At startup it skips to the end of the existing logs."""
     got = {"t": 0, "k": 0, "i": 0, "r": 0}
     for p in ROOT.glob("**/*.jsonl"):
         try:
@@ -172,7 +172,7 @@ def scan(first):
         off = offsets.get(p)
         if off is None:
             off = offsets[p] = size if first else 0
-        if size < off:   # felülírt fájl
+        if size < off:   # file was overwritten
             off, partial[p] = 0, b""
         if size == off:
             continue
@@ -189,17 +189,17 @@ def scan(first):
     return got
 
 
-# ---------- Fő ciklus ----------
+# ---------- Main loop ----------
 def fmt(n):
     return f"{n:,}".replace(",", " ")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Claude Code token-LED segédprogram")
-    ap.add_argument("--host", default="tokenled.local", help="a LED címe WiFi-n (alap: tokenled.local)")
-    ap.add_argument("--usb", nargs="?", const="", metavar="PORT", help="WiFi helyett USB soros, pl. --usb COM9")
-    ap.add_argument("--wifi", action="store_true", help="WiFi beállítása USB-n keresztül, majd kilép")
-    ap.add_argument("--test", type=int, metavar="N", help="típusonként N villanás, majd kilép")
+    ap = argparse.ArgumentParser(description="Claude Code token LED helper")
+    ap.add_argument("--host", default="tokenled.local", help="LED address over WiFi (default: tokenled.local)")
+    ap.add_argument("--usb", nargs="?", const="", metavar="PORT", help="USB serial instead of WiFi, e.g. --usb COM9")
+    ap.add_argument("--wifi", action="store_true", help="set up WiFi over USB, then exit")
+    ap.add_argument("--test", type=int, metavar="N", help="N flashes per type, then exit")
     a = ap.parse_args()
 
     if a.wifi:
@@ -211,16 +211,16 @@ def main():
     if a.test:
         end = time.monotonic() + 10
         while time.monotonic() < end and not getattr(led, "addr", None) and not getattr(led, "ser", None):
-            led.send("P\n")   # USB-n ez nyitja meg a portot
+            led.send("P\n")   # over USB this opens the port
             time.sleep(0.2)
-        led.send("".join(f"B {t} {a.test}\n" for t in "tkjir"))
-        print(f"Elküldve: típusonként {a.test} villanás (cián, lila, zöld, narancs, sötétkék).")
+        led.send("".join(f"B {t} {a.test}\n" for t in "tkjir") + "A 1\n")
+        print(f"Sent: {a.test} flashes per type (cyan, purple, green, orange, dark blue), then an approval blink.")
         return
 
     total = {"t": 0, "k": 0, "i": 0, "r": 0}
     last_ping = 0.0
     scan(first=True)
-    print(f"Figyelem (VS Code nélkül): {ROOT}")
+    print(f"Watching (without VS Code sessions): {ROOT}")
 
     while True:
         time.sleep(POLL_S)
@@ -230,8 +230,8 @@ def main():
             for t, n in got.items():
                 total[t] += n
             print(time.strftime("%H:%M:%S"),
-                  f"kimenet +{fmt(got['t'])}  thinking +{fmt(got['k'])}  bemenet +{fmt(got['i'])}"
-                  f"  cache +{fmt(got['r'])}   | össz.: {fmt(total['t'] + total['k'])} ki, {fmt(total['i'])} be")
+                  f"output +{fmt(got['t'])}  thinking +{fmt(got['k'])}  input +{fmt(got['i'])}"
+                  f"  cache +{fmt(got['r'])}   | total: {fmt(total['t'] + total['k'])} out, {fmt(total['i'])} in")
 
         if time.monotonic() - last_ping > PING_S:
             last_ping = time.monotonic()

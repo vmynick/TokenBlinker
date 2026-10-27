@@ -1,141 +1,96 @@
 # Claude token LED
 
-Asztali LED, ami villog, amikor Claude tokent generál.
+A desk LED (ESP32-C3 SuperMini Plus) that flashes live with the tokens Claude Code generates, and
+signals when Claude waits for your approval. WiFi, battery-capable, no proxy.
 
-- **claude.ai** → narancs LED
-- **Claude Code** → cián (szöveg), lila (thinking), zöld (tool input)
+It never calls the model and spends no tokens: it only watches output that is already flowing.
 
-Egyik rész sem hívja a modellt, tehát nem fogyaszt tokent: csak a már futó forgalmat figyeli.
+## Files
 
-## Fájlok
-
-| Fájl | Mi ez |
+| File | What it is |
 |---|---|
-| `token_tap.cs` → `token_tap.exe` | **Élő villogás:** indító a VS Code Claude-bővítményhez; a Claude kimenetéből élőben küldi a tokeneket a LED-nek. |
-| `token_blinker.py` | WiFi-beállítás USB-n, színteszt, és napló alapú számolás a terminálos Claude Code-hoz. |
-| `src/main.cpp` + `platformio.ini` | Firmware: ESP32-C3 SuperMini Plus, beépített WS2812B (GPIO8), WiFi + USB + webes felület. |
-| `token_led_test.py` | PC-s LED-emulátor ablak + Claude Code proxy + továbbítás az ESP32-re. Csak stdlib, nem módosít semmit a gépen. |
-| `token_led.ino` | WiFi-s ESP32-C3 firmware, 2× WS2812 (vagy 1 LED keverve). |
-| `claude-token-led.user.js` | Tampermonkey userscript a claude.ai-hoz. |
+| `token_tap.cs` → `token_tap.exe` | **Live flashing:** launcher for the VS Code Claude extension. Passes the `claude.exe` output through unchanged and sends the token stream and approval waits to the LED. |
+| `src/main.cpp` + `platformio.ini` | Firmware: onboard WS2812B (GPIO8) or an external strip, WiFi + USB + web page. |
+| `token_blinker.py` | WiFi setup over USB, colour test, and log-based counting for terminal Claude Code sessions. |
+| `token_led.ino`, `token_led_test.py`, `token_proxy.py`, `claude-token-led.user.js` | Old proxy-based experiments (Hungarian comments), kept for reference. |
 
-## Élő villogás (ESP32-C3 SuperMini Plus, WiFi, elemről is)
+## How it works
 
 ```
-VS Code Claude-bővítmény ──> token_tap.exe ──> claude.exe ──HTTPS──> api.anthropic.com   (változatlan)
-                                  │  a claude.exe kimenetét bájtra pontosan továbbadja,
-                                  │  közben a stream_event sorokból számol
-                                  └──UDP "T t 12"──> ESP32 (tokenled.local:4210) ──> villanások
+VS Code Claude extension ──> token_tap.exe ──> claude.exe ──HTTPS──> api.anthropic.com   (unchanged)
+                                  │  passes claude.exe's output through byte for byte,
+                                  │  meanwhile counts from the stream_event lines
+                                  └──UDP "T t 12" / "A 1"──> ESP32 (tokenled.local:4210) ──> flashes
 ```
 
-Nincs proxy és nincs háttérben futó program, az API-forgalom érintetlen. Ha a LED ki van kapcsolva vagy nincs hálózat, a Claude ugyanúgy működik, csak nem villog. A bővítmény a `claudeCode.claudeProcessWrapper` beállítással indítja a `token_tap.exe`-t (VS Code felhasználói `settings.json`); kikapcsolás: ezt a sort törölni, majd új Claude-munkamenet.
+There is no proxy and no background program, and the API traffic is untouched. If the LED is off or
+there is no network, Claude works exactly the same, it just does not flash. The extension starts
+`token_tap.exe` through the `claudeCode.claudeProcessWrapper` setting (VS Code user `settings.json`);
+to switch it off, delete that line and start a new Claude session.
 
-A szöveg/thinking/tool tokeneit generálás közben becsüli (4 karakter ≈ 1 token), az üzenet végén a valódi `output_tokens` szerint pótolja a különbséget; a bemenet és a cache a kérés elején, pontosan megy.
+Text, thinking and tool-input tokens are estimated while generating (4 characters ≈ 1 token); at the end of
+each message the real `output_tokens` tops up the difference. Input and cache tokens come exactly at the
+start of the request.
 
-| Szín | Mi | Egy villanás (alap) |
+| Colour | What | One flash (default) |
 |---|---|---|
-| cián | szöveg | 10 token |
-| lila | thinking | 10 token |
-| zöld | tool input | 10 token |
-| narancs | új bemenet (`input` + `cache_creation`) | 100 token |
-| sötétkék | cache olvasás | ki |
+| cyan | text | 10 tokens |
+| purple | thinking | 10 tokens |
+| green | tool input | 10 tokens |
+| orange | new input (`input` + `cache_creation`) | 100 tokens |
+| dark blue | cache read | off |
+| white, blinking | **Claude waits for your approval** | — |
 
-**Webes felület: http://tokenled.local**: token/villanás típusonként (0 = ki), fényerő, halvány derengés amíg a Claude fut (alapból ki), energiatakarékos WiFi (elemhez; kikapcsolva gyorsabb), színteszt, állapot és tokenszámok bekapcsolás óta, WiFi-hálózat módosítása.
+Approval: when Claude asks permission for a tool (`control_request` / `can_use_tool` on its output),
+the LED blinks white once per second until the request is answered. The LED forgets it after 5 s without a
+refresh, so a crashed launcher cannot leave it blinking. With several Claude sessions open, answering one
+clears the signal for all.
 
-**Rákötött LED-ek:** a webes felületen állítható a LED-ek száma (1-től 65 535-ig) és az adatláb (alap: GPIO8, a beépített LED). Külső WS2812 szalagot másik lábra (pl. GPIO4) kösd, a GND közös legyen, az 5 V a szalag saját tápjáról menjen. Egy villanás minden LED-et felgyújt a típus színével; az állapotjelző pötty és a derengés csak az elsőt. Sok LED sok áramot visz (kb. 60 mA/LED fehéren): szalagnál vedd lejjebb a fényerőt. Minden kirajzolás ~30 µs/LED ideig blokkol, ezért több ezer LED-nél a villanások lassulnak.
+## Web page: http://tokenled.local
 
-**WiFi beállítása (AP mód):** ha nincs mentett hálózat, vagy 30 s alatt nem tud csatlakozni, a LED saját, nyílt hálózatot indít: `TokenLED-xxxx` (a MAC utolsó 4 jegye). Telefonnal rácsatlakozva feljön a beállító oldal (ha nem: http://192.168.4.1), ott kiválasztható a hálózat és megadható a jelszó. Sikeres csatlakozás után az AP eltűnik. Ha a mentett hálózat csak átmenetileg nem elérhető, 3 percenként újrapróbálja, amíg senki nincs az AP-n. USB-n ugyanez: `python token_blinker.py --wifi`.
+- **Virtual LEDs** (one column per type + approval) with live token counts and flash counts.
+- Tokens per flash per type (0 = off), brightness, dim glow while Claude runs (off by default), power-saving WiFi
+  (for battery; off = faster), colour test (including an approval blink), status, WiFi network change.
+- **Attached LEDs and data pin.** Any number of LEDs from 1 to 65 535. The onboard LED is a single one on GPIO8; put an
+  external WS2812 strip on another pin (e.g. GPIO4), share GND, and power the strip from its own 5 V supply.
+  A strip draws up to ~60 mA per LED at full white, so lower the brightness. Drawing takes ~30 µs per LED, so
+  flashes get slower with thousands of LEDs.
+- **LED per type.** Each type and the approval signal can be given a LED number (1 = first, 0 = all LEDs).
+  Empty = automatic: with 5 or more LEDs every type gets its own LED (approval: the 6th LED when there are 6+),
+  otherwise all LEDs flash together in the type's colour. Status dots and the glow use the first LED only.
 
-A maradék nem vész el, átvivődik. Ha sok villanás vár, a LED gyorsít, 300 fölött eldobja a többit. 3 s-onként halvány pötty: piros = WiFi-re csatlakozik, sárga = beállító AP fut; bekapcsoláskor piros-zöld-kék teszt.
+## WiFi setup (AP mode)
+
+If no network is saved, or it cannot connect within 30 s, the LED starts its own open network
+`TokenLED-xxxx` (last 4 digits of its MAC). Join it with a phone and the setup page opens by itself
+(otherwise go to http://192.168.4.1): pick the network and enter the password. After a successful connection the AP
+disappears. If the saved network is only temporarily unavailable, it retries every 3 minutes while nobody is on the AP.
+The same over USB: `python token_blinker.py --wifi`.
+
+A dim dot every 3 s: red = connecting to WiFi, yellow = setup AP running. At power-on: red-green-blue test.
+
+## Usage
 
 ```powershell
 pio run -t upload                 # firmware (COM9, platformio.ini)
-python token_blinker.py --wifi    # USB-n, az AP mód helyett: bekéri a WiFi-nevet és a jelszót, az ESP flash-be menti
-python token_blinker.py --test 3  # színteszt
+python token_blinker.py --wifi    # WiFi over USB instead of AP mode: asks for name and password, saved in the ESP's flash
+python token_blinker.py --test 3  # colour test (WiFi); --usb for the USB serial port
 C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /optimize /r:System.Web.Extensions.dll token_tap.cs
 ```
 
-A `token_tap.exe` újrafordítása csak akkor megy, ha egy Claude-munkamenet sem használja (fájlzár). Ha a projektmappa elköltözik, a VS Code-beállítás útvonalát is át kell írni, különben a Claude nem indul.
+`--wifi` and `--usb` need `pip install pyserial`; the WiFi mode uses the standard library only. The PlatformIO serial
+monitor and the script cannot hold the port at the same time.
 
-Terminálos Claude Code-hoz: `python token_blinker.py` (naplóból, válaszonként; a VS Code-os munkameneteket kihagyja, hogy ne számoljon duplán).
+Rebuilding `token_tap.exe` fails while a Claude session uses it (file lock). Rename the running exe first
+(`ren token_tap.exe token_tap_old.exe`; running processes keep working), then build. If the project folder moves, also change
+the path in the VS Code setting, otherwise Claude will not start.
 
-Elemről: modem sleep és 80 MHz CPU a kisebb fogyasztásért (néhány száz ms késés). A panelen nincs töltő, a 3,3–6 V-os VCC/5V lábra mehet a táp; a WS2812B kikapcsolva is fogyaszt kb. 1 mA-t.
+Terminal Claude Code: `python token_blinker.py` (from the logs, per response; it skips VS Code sessions so nothing is
+counted twice). Approval waits are only detected in VS Code.
 
-Protokoll (UDP 4210 és USB CDC, soronként, egy UDP-csomagban több sor is lehet): `T <t|k|j|i|r> <token>` = nyers tokenek, `B <típus> <db>` = ennyi villanás, `P` = életjel; csak USB-n: `W <ssid>\t<jelszó>`, `?` → `IP <cím>` / `NOWIFI`.
+On battery: modem sleep and 80 MHz CPU for lower power (a few hundred ms latency). The board has no charger; power
+goes to the 3.3–6 V VCC/5V pin; the WS2812B draws about 1 mA even when off.
 
-## Régi, proxys változat
-
-### Architektúra
-
-```
-Claude Code ──HTTP──> token_led_test.py (127.0.0.1:8787) ──HTTPS──> api.anthropic.com
-                           │  SSE content_block_delta figyelés
-                           ├──> emulátor ablak
-                           └──UDP "C t 12"──> ESP32 (tokenled.local:4210)
-
-claude.ai (böngésző) ── Tampermonkey userscript ──HTTP GET /p?s=w&t=t&n=12──> ESP32 :80
-```
-
-## Protokoll (ESP32 és emulátor egyaránt)
-
-- **UDP 4210:** `"<forrás> <típus> <n>"`
-  - forrás: `W` = claude.ai, `C` = Claude Code
-  - típus: `t` = szöveg, `k` = thinking, `j` = tool input
-  - n: becsült tokenszám az adott ablakban
-- **HTTP:** `GET /p?s=w&t=t&n=12` (CORS: `*`)
-
-## LED-logika
-
-- Proxy 50 ms-onként, userscript 100 ms-onként küld egy csomagot (az ablakban gyűlt tokenekkel).
-- Minden csomag: `energia += 40 + n*8` (max 255), 10 ms-onként `×0.90` csillapítás.
-- Tokenbecslés: 4 karakter ≈ 1 token. Nem streamelt JSON válasznál a `usage.output_tokens` pontos értéke.
-
-## Használat
-
-### Teszt a PC-n (nem állít át semmit)
-
-```bash
-python token_led_test.py --demo     # szimulált forgalom
-python token_led_test.py            # proxy mód
-```
-
-Proxy módban, egy másik terminálban (csak arra a munkamenetre érvényes):
-
-```powershell
-$env:ANTHROPIC_BASE_URL="http://127.0.0.1:8787"; claude
-```
-
-Kézi teszt: `http://127.0.0.1:8080/p?s=w&n=20`
-
-### ESP32
-
-1. Arduino IDE / PlatformIO, könyvtár: **Adafruit NeoPixel**.
-2. `token_led.ino`: `WIFI_SSID`, `WIFI_PASS`, `LED_PIN`, `NUM_LEDS` beállítása.
-3. Feltöltés után: `http://tokenled.local/p?s=w&n=20`
-4. `token_led_test.py`-ban `ESP_HOST` = `tokenled.local` vagy az ESP IP-je.
-
-Bekapcsoláskor csatlakozás közben az első LED pirosan villog.
-
-### claude.ai
-
-1. Tampermonkey bővítmény telepítése.
-2. Új szkript → `claude-token-led.user.js` tartalma.
-3. `LED` konstans: `http://tokenled.local` (vagy IP, vagy `http://127.0.0.1:8080` az emulátorhoz).
-
-A szkript a `[data-is-streaming="true"]` elemet figyeli; ha a claude.ai UI változik, ezt kell igazítani.
-
-### Állandó Claude Code beállítás (opcionális)
-
-`~/.claude/settings.json`:
-
-```json
-{ "env": { "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787" } }
-```
-
-Figyelem: ha a proxy nem fut, a Claude Code nem működik.
-
-## Ötletek / TODO
-
-- Proxy futtatása szolgáltatásként (home lab), `HOST=0.0.0.0` több géphez.
-- Pontos, N tokenenkénti éles villanás mód.
-- Fallback: ha a proxy nem érhető el, közvetlen továbbítás (Claude Code ne álljon le).
-- 3D nyomtatott ház, diffúzor.
+Protocol (UDP 4210 and USB CDC, one command per line, several lines per UDP packet are fine):
+`T <t|k|j|i|r> <tokens>` raw tokens, `B <type> <count>` flash directly, `A 1` / `A 0` approval wait, `P` keep-alive;
+USB only: `W <ssid>\t<password>`, `?` → `IP <address>` / `NOWIFI`.
