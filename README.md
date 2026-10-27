@@ -39,13 +39,15 @@ A szöveg/thinking/tool tokeneit generálás közben becsüli (4 karakter ≈ 1 
 | narancs | új bemenet (`input` + `cache_creation`) | 100 token |
 | sötétkék | cache olvasás | ki |
 
-**Webes felület: http://tokenled.local**: token/villanás típusonként (0 = ki), fényerő, halvány derengés amíg a Claude fut (alapból ki), energiatakarékos WiFi (elemhez; kikapcsolva gyorsabb), színteszt, állapot és tokenszámok bekapcsolás óta.
+**Webes felület: http://tokenled.local**: token/villanás típusonként (0 = ki), fényerő, halvány derengés amíg a Claude fut (alapból ki), energiatakarékos WiFi (elemhez; kikapcsolva gyorsabb), színteszt, állapot és tokenszámok bekapcsolás óta, WiFi-hálózat módosítása.
 
-A maradék nem vész el, átvivődik. Ha sok villanás vár, a LED gyorsít, 300 fölött eldobja a többit. WiFi nélkül 3 s-onként halvány piros pötty; bekapcsoláskor piros-zöld-kék teszt.
+**WiFi beállítása (AP mód):** ha nincs mentett hálózat, vagy 30 s alatt nem tud csatlakozni, a LED saját, nyílt hálózatot indít: `TokenLED-xxxx` (a MAC utolsó 4 jegye). Telefonnal rácsatlakozva feljön a beállító oldal (ha nem: http://192.168.4.1), ott kiválasztható a hálózat és megadható a jelszó. Sikeres csatlakozás után az AP eltűnik. Ha a mentett hálózat csak átmenetileg nem elérhető, 3 percenként újrapróbálja, amíg senki nincs az AP-n. USB-n ugyanez: `python token_blinker.py --wifi`.
+
+A maradék nem vész el, átvivődik. Ha sok villanás vár, a LED gyorsít, 300 fölött eldobja a többit. 3 s-onként halvány pötty: piros = WiFi-re csatlakozik, sárga = beállító AP fut; bekapcsoláskor piros-zöld-kék teszt.
 
 ```powershell
 pio run -t upload                 # firmware (COM9, platformio.ini)
-python token_blinker.py --wifi    # egyszer, USB-n: bekéri a WiFi-nevet és a jelszót, az ESP flash-be menti
+python token_blinker.py --wifi    # USB-n, az AP mód helyett: bekéri a WiFi-nevet és a jelszót, az ESP flash-be menti
 python token_blinker.py --test 3  # színteszt
 C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /optimize /r:System.Web.Extensions.dll token_tap.cs
 ```
