@@ -56,9 +56,11 @@ clears the signal for all.
   and any number of LEDs from 0 (none, default) to 65 535. Wire it with a shared GND and power it from its own 5 V supply;
   a strip draws up to ~60 mA per LED at full white, so lower the brightness. Drawing takes ~30 µs per LED, so flashes get
   slower with thousands of LEDs.
-- **LED per type (strip).** Each type and the approval signal can be given a LED number (1 = first, 0 = all LEDs).
-  Empty = automatic: with 5 or more LEDs every type gets its own LED (approval: the 6th LED when there are 6+),
-  otherwise all strip LEDs flash together in the type's colour. Status dots and the glow go to the onboard LED (or to the strip's first LED when the onboard LED is off).
+- **Colour per type.** Every type and the approval signal has its own colour picker (applies to the onboard LED and the strip).
+- **LEDs per type (strip).** Each type can use any set of strip LEDs: a list like `1,3,5-8` (1 = first LED), `all` or `0` = every LED.
+  Several types may share LEDs. Empty = automatic: with 5 or more LEDs every type gets its own LED (approval: the 6th LED when
+  there are 6+), otherwise all strip LEDs flash together in the type's colour. Status dots and the glow go to the onboard LED
+  (or to the strip's first LED when the onboard LED is off).
 
 ## WiFi setup (AP mode)
 

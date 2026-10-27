@@ -33,7 +33,6 @@
 #define WAIT_MS     5000    // approval wait expires this long after the last "A 1"
 #define AP_AFTER_MS 30000   // failed-connection time before the setup AP starts
 #define AP_RETRY_MS 180000  // in AP mode, retry the saved WiFi after this long if nobody joined the AP
-#define AUTO        0xFFFF  // LED assignment: automatic
 
 Adafruit_NeoPixel ob(1, LED_PIN, NEO_GRB + NEO_KHZ800);        // onboard LED
 Adafruit_NeoPixel px(0, STRIP_PIN, NEO_GRB + NEO_KHZ800);      // external strip (none until a count is set)
@@ -60,7 +59,7 @@ bool shownF = false;  // last write was a token flash
 
 const char TYPES[] = "tkjir";
 const char* NAMES[] = {"Text", "Thinking", "Tool", "New input", "Cache", "Approval"};
-const char* COLORS[] = {"#0bf", "#90f", "#0f4", "#f60", "#33f", "#fff"};
+const uint32_t DEF_COL[] = {0x00B4FF, 0x9600FF, 0x00FF3C, 0xFF5A00, 0x000078, 0xFFFFFF};   // cyan, purple, green, orange, dark blue, white
 uint32_t rem[5], total[5], flashes[5];
 
 // ---------- Settings (web page, flash) ----------
@@ -68,8 +67,37 @@ struct Cfg {
   uint16_t out, in, cache, count;
   uint8_t bright, pin, onb;   // pin: strip data pin; onb: onboard LED 0 = mirror, 1 = status only, 2 = off
   bool glow, saver;
-  uint16_t tgt[6];   // LED per type (+ approval): 0 = all LEDs, n = LED n (1-based), AUTO = automatic
+  uint32_t col[6];   // colour per type (+ approval), 0xRRGGBB
+  String list[6];    // strip LEDs per type (+ approval), as typed: "1,3,5-8", "all", empty = auto
 } cfg;
+
+// Parsed LED list of one function. Empty list = automatic: with 5+ strip LEDs every type has its own LED
+// (approval: the 6th, needs 6+), otherwise all strip LEDs.
+struct Sel { bool autoSel = true, all = false; uint8_t n = 0; uint16_t lo[8], hi[8]; } sel[6];
+
+void parseSel(const String& str, Sel& s) {
+  s = Sel();
+  String t = str;
+  t.trim();
+  t.toLowerCase();
+  if (!t.length()) return;
+  s.autoSel = false;
+  const char* p = t.c_str();
+  while (*p && s.n < 8) {
+    while (*p && !isdigit((unsigned char)*p) && *p != 'a') p++;
+    if (!*p) break;
+    if (*p == 'a') { s.all = true; return; }          // "all"
+    long a = strtol(p, (char**)&p, 10), b = a;
+    while (*p == ' ') p++;
+    if (*p == '-') { p++; b = strtol(p, (char**)&p, 10); }   // range "5-8"
+    if (a == 0) { s.all = true; return; }
+    if (b < a) b = a;
+    s.lo[s.n] = min(a, 65535L);
+    s.hi[s.n] = min(b, 65535L);
+    s.n++;
+  }
+  if (!s.n) s.autoSel = true;   // nothing valid typed
+}
 
 // Allowed strip pins: not the onboard LED (8), boot (9), USB (18, 19) or UART (20, 21) pins.
 bool pinOk(int p) { return (p >= 0 && p <= 7) || p == 10; }
@@ -85,7 +113,11 @@ void loadCfg() {
   cfg.bright = prefs.getUChar("bright", 120);
   cfg.glow   = prefs.getBool("glow", false);
   cfg.saver  = prefs.getBool("saver", true);
-  for (int i = 0; i < 6; i++) cfg.tgt[i] = prefs.getUShort((String("g") + i).c_str(), AUTO);
+  for (int i = 0; i < 6; i++) {
+    cfg.col[i]  = prefs.getUInt((String("c") + i).c_str(), DEF_COL[i]);
+    cfg.list[i] = prefs.getString((String("l") + i).c_str(), "");
+    parseSel(cfg.list[i], sel[i]);
+  }
   prefs.end();
 }
 
@@ -100,7 +132,10 @@ void saveCfg() {
   prefs.putUChar("bright", cfg.bright);
   prefs.putBool("glow", cfg.glow);
   prefs.putBool("saver", cfg.saver);
-  for (int i = 0; i < 6; i++) prefs.putUShort((String("g") + i).c_str(), cfg.tgt[i]);
+  for (int i = 0; i < 6; i++) {
+    prefs.putUInt((String("c") + i).c_str(), cfg.col[i]);
+    prefs.putString((String("l") + i).c_str(), cfg.list[i]);
+  }
   prefs.end();
 }
 
@@ -112,7 +147,23 @@ void applyCfg() {
 }
 
 // ---------- LED ----------
-// target (strip): -1 = all LEDs, -2 = status (first LED, only when the onboard LED is off), n >= 0 = that LED.
+// Lights the strip LEDs that belong to function f in colour c (everything else off).
+void drawStrip(uint32_t c, int f) {
+  px.clear();
+  if (f < 0 || c == 0) { px.fill(c); return; }
+  Sel& s = sel[f];
+  if (s.autoSel) {
+    if (cfg.count >= (f < 5 ? 5 : 6)) px.setPixelColor(f, c); else px.fill(c);
+  } else if (s.all) {
+    px.fill(c);
+  } else {
+    for (int r = 0; r < s.n; r++)
+      for (uint32_t i = s.lo[r] - 1; i < s.hi[r] && i < cfg.count; i++) px.setPixelColor(i, c);
+  }
+}
+
+// target: function 0-5 (type or approval: its LEDs on the strip), -1 = all strip LEDs,
+//         -2 = status (first strip LED, only when the onboard LED is off).
 // flash: a token flash (the onboard LED may be set to show status only).
 void led(uint32_t c, int target = -1, bool flash = false) {
   if (c == 0) target = -1;
@@ -125,8 +176,7 @@ void led(uint32_t c, int target = -1, bool flash = false) {
   ob.show();
   if (!px.numPixels()) return;
   if (target == -2 && cfg.onb != 2) c = 0;
-  px.clear();
-  if (target == -1) px.fill(c); else px.setPixelColor(target == -2 ? 0 : target, c);
+  if (target == -2) { px.clear(); px.setPixelColor(0, c); } else drawStrip(c, target);
   px.show();
 }
 
@@ -141,23 +191,18 @@ void applyHw() {
   shown = 1;
 }
 
-// Which LED a type (0-4) or the approval signal (5) uses; -1 = all LEDs.
-// Automatic: with 5+ LEDs every type has its own LED, the approval signal gets the 6th; otherwise all LEDs.
-int targetFor(int idx) {
-  int v = cfg.tgt[idx];
-  if (v == AUTO) return cfg.count >= (idx < 5 ? 5 : 6) ? idx : -1;
-  return v >= 1 && v <= cfg.count ? v - 1 : -1;
+uint32_t rgb(int i) {
+  uint32_t v = cfg.col[i];
+  return px.Color((v >> 16) & 255, (v >> 8) & 255, v & 255);
 }
 
-uint32_t color(char type) {
-  switch (type) {
-    case 'k': return px.Color(150, 0, 255);  // thinking
-    case 'j': return px.Color(0, 255, 60);   // tool input
-    case 'i': return px.Color(255, 90, 0);   // new input
-    case 'r': return px.Color(0, 0, 120);    // cache read
-    default:  return px.Color(0, 180, 255);  // text
-  }
+String hex(int i) {
+  char b[8];
+  snprintf(b, sizeof(b), "#%06x", (unsigned)(cfg.col[i] & 0xFFFFFF));
+  return b;
 }
+
+uint32_t color(char type) { return rgb(type ? (strchr(TYPES, type) ? strchr(TYPES, type) - TYPES : 0) : 0); }
 
 void enqueue(char type, long n) {
   n = min(n, (long)MAX_PENDING - pending);
@@ -215,7 +260,7 @@ void play() {
   if (!qCount) {
     state = IDLE;
     if (waitUntil && (int32_t)(now - waitUntil) < 0) {     // Claude waits for approval: white blink
-      if (now / 500 % 2 == 0) led(px.Color(255, 255, 255), targetFor(5));
+      if (now / 500 % 2 == 0) led(rgb(5), 5);
       else led(0);
       return;
     }
@@ -230,7 +275,7 @@ void play() {
 
   Item& it = q[qHead];
   curType = it.type;
-  led(color(curType), targetFor(typeIdx(curType)), true);
+  led(color(curType), typeIdx(curType), true);
   flashes[typeIdx(curType)]++;
   if (--it.n == 0) { qHead = (qHead + 1) % QUEUE_LEN; qCount--; }
   pending--;
@@ -375,6 +420,7 @@ h2{margin:8px 0 16px}h3{margin:24px 0 8px;font-size:15px;color:#999}a{color:#6bf
 label{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:10px 0}
 input:not([type=checkbox]),select{width:90px;padding:4px;background:#222;color:#eee;border:1px solid #444;border-radius:4px}
 input[name=ssid],input[name=pass]{width:180px}
+input.lst{width:110px}input[type=color]{width:44px;height:28px;padding:0}
 button{padding:8px 16px;margin:12px 8px 0 0;background:#333;color:#eee;border:1px solid #555;border-radius:6px}
 .d{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:3px}
 .box{border:1px solid #a80;border-radius:8px;padding:4px 12px 12px;margin-bottom:16px}
@@ -385,7 +431,7 @@ small{color:#888}
 .l{width:30px;height:30px;border-radius:50%;margin:0 auto 6px;border:1px solid #333}
 .g small{display:block}.g b{font-size:12px}</style><h2>Token LED</h2>)";
 
-String dot(const char* c) { return String("<i class=d style=background:") + c + "></i>"; }
+String dot(const String& c) { return "<i class=d style=background:" + c + "></i>"; }
 
 String numField(const char* name, const String& label, long v, long lo, long hi) {
   return "<label><span>" + label + "</span><input type=number name=" + name + " min=" + lo + " max=" + hi +
@@ -410,16 +456,16 @@ void handleRoot() {
   // Virtual LEDs: one column per type, plus the approval signal
   s += "<div class=g>";
   for (int i = 0; i < 6; i++) {
-    s += String("<div><div class=l id=l") + i + " style=background:" + COLORS[i] + ";opacity:.15></div><b>" + NAMES[i] +
+    s += String("<div><div class=l id=l") + i + " style=background:" + hex(i) + ";opacity:.15></div><b>" + NAMES[i] +
          "</b><small id=n" + i + ">" + (i < 5 ? total[i] : approvals) + "</small><small id=f" + i + ">" +
          (i < 5 ? String(flashes[i]) + " flashes" : String("idle")) + "</small></div>";
   }
   s += "</div>";
 
   s += "<form method=post action=/save>";
-  s += numField("out", dot("#0bf") + dot("#90f") + dot("#0f4") + "Text, thinking, tool: tokens per flash", cfg.out, 0, 60000);
-  s += numField("in", dot("#f60") + "New input: tokens per flash", cfg.in, 0, 60000);
-  s += numField("cache", dot("#33f") + "Cache read: tokens per flash", cfg.cache, 0, 60000);
+  s += numField("out", dot(hex(0)) + dot(hex(1)) + dot(hex(2)) + "Text, thinking, tool: tokens per flash", cfg.out, 0, 60000);
+  s += numField("in", dot(hex(3)) + "New input: tokens per flash", cfg.in, 0, 60000);
+  s += numField("cache", dot(hex(4)) + "Cache read: tokens per flash", cfg.cache, 0, 60000);
   s += "<small>0 = no flash for this type.</small>";
   s += numField("bright", "Brightness (1–255)", cfg.bright, 1, 255);
   s += checkField("glow", "Dim glow while Claude is running", cfg.glow);
@@ -434,11 +480,12 @@ void handleRoot() {
        String(cfg.count) + "></label><datalist id=cnt><option>0<option>1<option>2<option>5<option>6<option>10<option>50<option>100</datalist>";
   s += numField("pin", "External strip data pin (GPIO 0–7, 10)", cfg.pin, 0, 10);
   for (int i = 0; i < 6; i++) {
-    s += String("<label><span>") + dot(COLORS[i]) + NAMES[i] + " LED</span><input type=number name=g" + i +
-         " min=0 max=65534 placeholder=auto value=" + (cfg.tgt[i] == AUTO ? String("") : String(cfg.tgt[i])) + "></label>";
+    s += String("<label><span>") + dot(hex(i)) + NAMES[i] + "</span><span><input type=color name=c" + i + " value=" + hex(i) +
+         "> <input class=lst name=g" + i + " placeholder=auto value=\"" + esc(cfg.list[i]) + "\"></span></label>";
   }
-  s += "<small>Applies to the external strip. LED number (1 = first), 0 = all LEDs, empty = auto: with 5+ LEDs every "
-       "type has its own LED (approval: the 6th), otherwise all LEDs flash together.</small>";
+  s += "<small>Colour per type (onboard LED and strip). LEDs (strip): a list like <b>1,3,5-8</b> (1 = first LED), "
+       "<b>all</b> or 0 = every LED, empty = auto: with 5+ LEDs every type has its own LED (approval: the 6th), "
+       "otherwise all LEDs flash together. Several types may share LEDs.</small>";
   s += "<br><button>Save</button></form><form method=post action=/test><button>Colour test</button></form>";
 
   s += "<h3>Status</h3><table>";
@@ -496,7 +543,10 @@ void handleSave() {
   for (int i = 0; i < 6; i++) {
     String a = http.arg(String("g") + i);
     a.trim();
-    cfg.tgt[i] = a.length() ? constrain(a.toInt(), 0, 65534) : AUTO;
+    cfg.list[i] = a.substring(0, 60);
+    parseSel(cfg.list[i], sel[i]);
+    String c = http.arg(String("c") + i);   // "#rrggbb"
+    if (c.length() == 7 && c[0] == '#') cfg.col[i] = strtoul(c.c_str() + 1, nullptr, 16) & 0xFFFFFF;
   }
   uint16_t count = constrain(http.arg("count").toInt(), 0, 65535);
   cfg.onb = constrain(http.arg("onb").toInt(), 0, 2);
