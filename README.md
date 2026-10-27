@@ -133,16 +133,24 @@ New protocol lines: `D 0` / `D 1` (turn finished / error), `U <5h%> <7d%>` (usag
 
 `enclosure/TokenLED_Box/TokenLED_Box.py` is a Fusion 360 script that builds the box (concept "A", parametric: change the numbers
 at the top and run it again). Fusion 360 > Utilities > Scripts and Add-Ins > Scripts > "+" > pick the `TokenLED_Box` folder > Run.
-It creates the bodies *Base* and *Lid* and saves `base.stl` / `lid.stl` next to the script.
-`python enclosure/plate_p2s.py` turns them into print orientation (`*_P2S.stl`) and a plate file `TokenLED_Box_P2S.3mf`.
+It creates the bodies *Base*, *Lid*, *Diffuser* and *Baffle* (plus *Strip (reference)*, only to show the LED strip) and saves
+`base.stl`, `lid.stl`, `diffuser.stl` and `baffle.stl` next to the script.
+`python enclosure/plate_p2s.py` turns them into print orientation (`*_P2S.stl`) and one plate file per filament colour:
+`TokenLED_Box_P2S.3mf` (base + lid), `TokenLED_Diffuser_P2S.3mf` (white) and `TokenLED_Baffle_P2S.3mf` (black).
 
 - Wedge with a trapezoid footprint: 70 mm wide at the front, 36 at the back, 52 deep; 22 mm high at the front, 13 at the back.
-- Front: light window for the 7-LED strip (50 x 10 mm, standing on its edge behind the front wall); a 0.8 mm skin is the
-  diffuser, so print the base in **white or natural PLA**.
+- Front: the 7-LED strip (50 x 10 mm) stands on its edge in a bay behind the front, its back stuck to the bay's back wall.
+  The wires go back through a slot at the right end of that wall (open at the top, so they are laid in, not threaded).
+- Light baffle (**black PLA**): one 5.3 x 8 mm cell per LED, so each LED lights only its own segment of the diffuser. Its
+  1 mm walls reach into the 1.3 mm gaps between the LEDs, which also centres it; its top bar holds the strip down.
+- Diffuser (**white PLA**, 1.6 mm): it slides down from the top, flush with the front face; its back plate reaches behind
+  0.8 mm lips at the sides and the bottom, so it cannot fall out forwards, and the lid holds it down.
 - Back: the ESP32-C3 SuperMini Plus on two rails between fences, its USB-C end in the rear opening (11 x 5.2 mm).
 - Lid: sloped plate, 4 x **M2 x 5** screws into **M2 brass heat-set inserts** (3.2 mm holes, 4 mm deep; press them in with a
   soldering iron). The screw posts are joined to the corners.
 - 4 round recesses (10 mm, 1 mm deep) in the bottom for adhesive rubber feet.
+- Assembly: board, strip (wires into the slot), baffle, diffuser, lid.
 - Printing (Bambu Lab P2S, PLA Basic, 0.2 mm Standard, 3 walls, 15 % infill, no supports): the base stands on its bottom,
-  the lid lies on its top face.
-- The board and strip sizes are assumptions (board 23 x 18 mm): measure yours and adjust the parameters.
+  the lid lies on its top face, the diffuser on its back plate, the baffle on its front face.
+- The board and strip sizes are assumptions (board 23 x 18 mm; strip 0.5 mm thick with its tape, LEDs 5 x 5 x 1.6 mm with
+  1.3 mm gaps, centred on the strip): measure yours and adjust the parameters.

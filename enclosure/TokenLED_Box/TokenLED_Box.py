@@ -2,9 +2,12 @@
 Token LED enclosure for Fusion 360 (script), concept "A": a wedge with a trapezoid footprint.
 Wide and tall at the front (7-LED light window), narrower and lower at the back (controller + USB-C).
 
-  front: light window for the 7-LED strip (50 x 10 mm) behind a thin skin = diffuser
+  front: the 7-LED strip (50 x 10 mm) in a bay behind the front, its wires go back through a slot in the bay's back wall;
+         a light baffle (black PLA) with one cell per LED in front of it, and a diffuser plate (white PLA) that slides
+         down from the top, flush with the front face
   back : the ESP32-C3 SuperMini Plus with its USB-C opening
-  lid  : sloped plate of constant thickness, 4 x M2 screws into brass heat-set inserts (soldering iron), heads sunk
+  lid  : sloped plate of constant thickness, 4 x M2 screws into brass heat-set inserts (soldering iron), heads sunk;
+         it also holds the diffuser down
   feet : 4 round recesses in the bottom for adhesive rubber feet
 
 Run: Fusion 360 > Utilities > Scripts and Add-Ins > Scripts > "+" (add existing script) > pick the TokenLED_Box folder > Run.
@@ -31,12 +34,33 @@ USB_ABOVE_PCB = 1.7     # USB-C centre above the PCB top
 USB_SLOT_W = 11.0       # opening for the plug (with its overmould)
 USB_SLOT_H = 5.2
 
-# LED strip behind the front wall (LEDs facing forward, strip standing on its edge)
+# LED strip standing on its edge in a bay behind the front, LEDs facing forward. In front of it the diffuser: a front plate
+# that fills the opening in the front face (flush) and a wider back plate that reaches behind the lips at the sides and
+# the bottom, so it cannot fall out forwards. It slides down from the top; the lid holds it.
 STRIP_LEN = 50.0
 STRIP_W = 10.0
-WIN_H = 8.0             # light window height (the strip is centred on it)
-WIN_Z0 = 10.0           # window bottom above the box bottom
-SKIN = 0.8              # diffuser skin left in the window (print in white / natural PLA)
+STRIP_PCB = 0.5         # strip with its adhesive tape, without the LEDs
+LED_N = 7
+LED_SIZE = 5.0
+LED_GAP = 1.3           # between two LEDs (pitch = LED_SIZE + LED_GAP)
+LED_H = 1.6             # LED height above the strip
+LED_X0 = 0.0            # centre of the LED row from the strip's centre (+X = right, seen from the front)
+AIR = 4.0               # LED tops to the diffuser (depth of the baffle's cells)
+BAY_WALL = 1.6
+BAND_Z0 = 6.5           # bottom of the diffuser band on the front; the strip stands on the bay floor at this height
+BAND_HW = 26.4          # half width of the band
+LIP = 0.8               # lips in front of the diffuser's back plate = thickness of its front plate
+DIFF_T2 = 0.8           # diffuser back plate (the diffuser is LIP + DIFF_T2 thick)
+TONGUE = 1.2            # how far the back plate reaches behind the lips
+DIFF_CLR = 0.15         # sliding clearance
+WIRE_W = 5.0            # wire slot in the bay's back wall at the +X end (right, seen from the front), open at the top
+WIRE_Z = 4.0            # slot bottom above the bay floor
+
+# Light baffle (separate part, black PLA) between the strip and the diffuser: one cell per LED, so every LED lights only its
+# own segment of the diffuser. Its walls reach into the gaps between the LEDs (that also centres it on them) and its top
+# bar reaches over the strip's top edge. It drops into the bay after the strip.
+BAFFLE_T = 1.0          # cell wall thickness (must fit LED_GAP)
+CELL_H = 8.0            # cell height, centred on the LEDs
 
 # Box
 W_FRONT = 70.0          # width at the front
@@ -95,6 +119,36 @@ def usb_zc():
     return FLOOR + STANDOFF + PCB_T + USB_ABOVE_PCB
 
 
+def groove_y():
+    """Back of the diffuser's groove = front of the LED bay."""
+    return LIP + DIFF_T2 + DIFF_CLR
+
+
+def bay_hl():
+    return STRIP_LEN / 2.0 + 0.4
+
+
+def strip_t():
+    return STRIP_PCB + LED_H
+
+
+def bay_y1():
+    """Back of the LED bay (the strip's back rests here)."""
+    return groove_y() + AIR + strip_t()
+
+
+def led_x():
+    """LED centres."""
+    p = LED_SIZE + LED_GAP
+    return [LED_X0 + (i - (LED_N - 1) / 2.0) * p for i in range(LED_N)]
+
+
+def baffle_x():
+    """Centres of the baffle's cell walls: between the LEDs and one beyond each end."""
+    p = LED_SIZE + LED_GAP
+    return [LED_X0 + (k - LED_N / 2.0) * p for k in range(LED_N + 1)]
+
+
 def board_y():
     """Board front and back edge (its USB-C end is at the back)."""
     y1 = DEPTH - WALL - 0.3
@@ -120,15 +174,24 @@ def feet_points():
 def check_layout():
     """Returns a list of problems (empty = fine)."""
     bad = []
-    if WIN_Z0 + WIN_H / 2.0 + STRIP_W / 2.0 > under_z(0):
-        bad.append("The strip does not fit under the lid at the front: raise H_FRONT or lower WIN_Z0.")
-    if WIN_Z0 + WIN_H > under_z(0) - 0.5:
-        bad.append("Light window reaches the lid: raise H_FRONT or lower WIN_Z0 / WIN_H.")
-    if STRIP_LEN / 2.0 + 0.5 > half_w(0) - R_FRONT:
-        bad.append("The strip is wider than the front: raise W_FRONT.")
+    if BAND_Z0 + STRIP_W + 1.2 > under_z(bay_y1()):
+        bad.append("No room for the strip and its wires under the lid: raise H_FRONT or lower BAND_Z0.")
+    if BAND_Z0 - TONGUE < FLOOR + 1.0:
+        bad.append("Diffuser band too low: raise BAND_Z0.")
+    if BAND_HW < bay_hl() + 0.5:
+        bad.append("Diffuser band narrower than the LED bay: raise BAND_HW.")
+    if BAND_HW + TONGUE + 1.0 > half_w(0) - R_FRONT:
+        bad.append("Diffuser groove runs into the rounded front corners: raise W_FRONT or lower BAND_HW.")
     fx = half_w(BOSS_Y_FRONT) - BOSS_INSET
-    if fx - BOSS_D / 2.0 < STRIP_LEN / 2.0 + 0.5:
-        bad.append("Front boss collides with the LED strip: raise W_FRONT or BOSS_Y_FRONT.")
+    if fx - INS_D / 2.0 - bay_hl() < 1.2:
+        bad.append("Front insert too close to the LED bay: raise W_FRONT.")
+    if BAFFLE_T > LED_GAP - 0.2:
+        bad.append("Baffle walls do not fit between the LEDs: lower BAFFLE_T.")
+    xs = baffle_x()
+    if xs[0] - BAFFLE_T / 2.0 < -bay_hl() + 0.5 or xs[-1] + BAFFLE_T / 2.0 > bay_hl() - 2.0:
+        bad.append("The LED row (and the baffle) does not fit the bay, or leaves no room for the wires at the +X end.")
+    if under_z(bay_y1()) - 0.2 - (BAND_Z0 + STRIP_W + 0.1) < 1.0:
+        bad.append("No room for the baffle's top bar over the strip: raise H_FRONT or lower BAND_Z0.")
     if usb_zc() + USB_SLOT_H / 2.0 > under_z(DEPTH) - 0.8:
         bad.append("USB opening reaches the lid at the back: raise H_REAR or lower the board.")
     if usb_zc() - USB_SLOT_H / 2.0 < FLOOR + 0.4:
@@ -144,8 +207,6 @@ def check_layout():
         bad.append("Rear boss is too short for the insert: raise H_REAR or lower INS_DEPTH.")
     if LID_T - HEAD_DEPTH < 0.8:
         bad.append("Lid is too thin under the screw head.")
-    if WALL - SKIN < 0.8:
-        bad.append("Front wall too thin for the diffuser window.")
     return bad
 
 
@@ -338,6 +399,30 @@ def s_bosses(b):
                       bodies=[body(b, "Base")], polygons=corner_fills(zf))
 
 
+def s_bay_block(b):
+    # solid block behind the front wall, side wall to side wall; the LED bay is cut into it after the trim
+    zf = FLOOR - 0.1
+    y0, y1 = WALL - 0.5, bay_y1() + BAY_WALL
+    pts = [(-half_w_in(y0) - 0.5, y0, zf), (half_w_in(y0) + 0.5, y0, zf), (half_w_in(y1) + 0.5, y1, zf),
+           (-half_w_in(y1) - 0.5, y1, zf)]
+    b.polygon_extrude(b.xy_plane(zf), pts, Join, height=60, bodies=[body(b, "Base")])
+
+
+def s_clip(b):
+    # the corner fills and the bay block reach past the rounded (acute) front corners: keep only what is inside the
+    # rounded outline
+    f = b.polygon_extrude(b.root.xYConstructionPlane, plan(), New, height=80)
+    shell = f.bodies.item(0)
+    b.fillet_vertical(shell, R_FRONT, y_max=1.0)
+    b.fillet_vertical(shell, R_REAR, y_min=DEPTH - 1.0)
+    tools = adsk.core.ObjectCollection.create()
+    tools.add(shell)
+    comb = b.root.features.combineFeatures
+    inp = comb.createInput(body(b, "Base"), tools)
+    inp.operation = adsk.fusion.FeatureOperations.IntersectFeatureOperation
+    comb.add(inp)
+
+
 def s_trim(b):
     # everything above the lid's underside plane goes
     b.polygon_extrude(b.root.yZConstructionPlane,
@@ -352,10 +437,18 @@ def s_usb(b):
     b.rects_extrude(b.xy_plane(zc), rect, Cut, full_len=USB_SLOT_H, bodies=[body(b, "Base")])
 
 
-def s_window(b):
-    # a pocket from the outside of the front wall; SKIN mm of the wall stays as the diffuser
-    b.rects_extrude(b.root.xZConstructionPlane, [(-STRIP_LEN / 2.0, 0, WIN_Z0, STRIP_LEN / 2.0, 0, WIN_Z0 + WIN_H)],
-                    Cut, full_len=2 * (WALL - SKIN), bodies=[body(b, "Base")])
+def s_bay(b):
+    # front to back, all open towards the lid: the opening for the diffuser's front plate, the groove for its back plate
+    # behind the lips, and the bay for the strip
+    for hw, y0, y1, z0 in ((BAND_HW, -1.0, LIP, BAND_Z0),
+                           (BAND_HW + TONGUE, LIP, groove_y(), BAND_Z0 - TONGUE),
+                           (bay_hl(), groove_y(), bay_y1(), BAND_Z0)):
+        b.rects_extrude(b.xy_plane(z0 + 20), [(-hw, y0, z0 + 20, hw, y1, z0 + 20)], Cut, full_len=40,
+                        bodies=[body(b, "Base")])
+    # wire slot through the bay's back wall at the +X end
+    z0 = BAND_Z0 + WIRE_Z
+    b.rects_extrude(b.xy_plane(z0 + 20), [(bay_hl() - WIRE_W, bay_y1() - 0.1, z0 + 20, bay_hl(),
+                                           bay_y1() + BAY_WALL + 1.0, z0 + 20)], Cut, full_len=40, bodies=[body(b, "Base")])
 
 
 def s_feet(b):
@@ -397,15 +490,76 @@ def s_lid_holes(b):
                           bodies=[body(b, "Lid")])
 
 
+def s_diffuser(b):
+    # separate part: front plate flush in the opening, back plate behind the lips; its top follows the lid 0.1 mm below
+    c = DIFF_CLR
+    y2 = LIP + DIFF_T2
+
+    def top(y):
+        return under_z(y) - 0.1
+
+    f = b.polygon_extrude(b.root.yZConstructionPlane,
+                          [(0, 0, BAND_Z0 + c), (0, LIP, BAND_Z0 + c), (0, LIP, top(LIP)), (0, 0, top(0))],
+                          New, 2 * (BAND_HW - c))
+    f.bodies.item(0).name = "Diffuser"
+    b.polygon_extrude(b.root.yZConstructionPlane,
+                      [(0, LIP, BAND_Z0 - TONGUE), (0, y2, BAND_Z0 - TONGUE), (0, y2, top(y2)), (0, LIP, top(LIP))],
+                      Join, 2 * (BAND_HW + TONGUE - c), bodies=[body(b, "Diffuser")])
+
+
+def s_baffle(b):
+    # separate part: a block from the diffuser to the LED tops with one cell per LED, the walls between the LEDs reach on
+    # towards the strip, the top bar reaches over the strip's top edge; its top follows the lid 0.2 mm below
+    xs = baffle_x()
+    x0, x1 = xs[0] - BAFFLE_T / 2.0, xs[-1] + BAFFLE_T / 2.0
+    yf = LIP + DIFF_T2 + 0.05                  # against the diffuser
+    yb = bay_y1() - strip_t() - 0.2            # just in front of the LED tops
+    zs = BAND_Z0 + STRIP_W + 0.1               # above the strip
+    f = b.rects_extrude(b.xy_plane(BAND_Z0), [(x0, yf, BAND_Z0, x1, yb, BAND_Z0)], New, height=20)
+    f.bodies.item(0).name = "Baffle"
+    b.rects_extrude(b.xy_plane(zs), [(x0, yb, zs, x1, bay_y1() - 0.2, zs)], Join, height=20, bodies=[body(b, "Baffle")])
+    yw = bay_y1() - STRIP_PCB - 0.3
+    b.rects_extrude(b.xy_plane(BAND_Z0), [(x - BAFFLE_T / 2.0, yb, BAND_Z0, x + BAFFLE_T / 2.0, yw, BAND_Z0)
+                                          for x in xs[1:-1]], Join, height=STRIP_W + 0.1, bodies=[body(b, "Baffle")])
+    b.polygon_extrude(b.root.yZConstructionPlane,
+                      [(0, -5, under_z(-5) - 0.2), (0, DEPTH + 5, under_z(DEPTH + 5) - 0.2), (0, DEPTH + 5, 90),
+                       (0, -5, 90)], Cut, W_FRONT + 10, bodies=[body(b, "Baffle")])
+    zc = BAND_Z0 + STRIP_W / 2.0
+    b.rects_extrude(b.xy_plane(zc), [(xs[k] + BAFFLE_T / 2.0, yf - 1.0, zc, xs[k + 1] - BAFFLE_T / 2.0, yb + 0.5, zc)
+                                     for k in range(LED_N)], Cut, full_len=CELL_H, bodies=[body(b, "Baffle")])
+
+
+def s_strip_ref(b):
+    # the LED strip itself, only to see (and check) how it sits; not exported
+    y1 = bay_y1()
+    f = b.rects_extrude(b.xy_plane(BAND_Z0), [(-STRIP_LEN / 2.0, y1 - STRIP_PCB, BAND_Z0, STRIP_LEN / 2.0, y1, BAND_Z0)],
+                        New, height=STRIP_W)
+    f.bodies.item(0).name = "Strip (reference)"
+    z0 = BAND_Z0 + (STRIP_W - LED_SIZE) / 2.0
+    b.rects_extrude(b.xy_plane(z0),
+                    [(x - LED_SIZE / 2.0, y1 - strip_t(), z0, x + LED_SIZE / 2.0, y1 - STRIP_PCB, z0) for x in led_x()],
+                    Join, height=LED_SIZE, bodies=[body(b, "Strip (reference)")])
+
+
 def s_tidy(b):
     for i in range(b.root.constructionPlanes.count):
         b.root.constructionPlanes.item(i).isLightBulbOn = False
     for i in range(b.root.sketches.count):
         b.root.sketches.item(i).isLightBulbOn = False
+    # on-screen colours only: grey box, white diffuser, black baffle
+    try:
+        lib = adsk.core.Application.get().materialLibraries.itemByName("Fusion Appearance Library")
+        for name, look in (("Base", "Plastic - Matte (Gray)"), ("Lid", "Plastic - Matte (Gray)"),
+                           ("Diffuser", "Plastic - Matte (White)"), ("Baffle", "Plastic - Matte (Black)"),
+                           ("Strip (reference)", "Plastic - Glossy (White)")):
+            a = b.design.appearances.itemByName(look) or b.design.appearances.addByCopy(lib.appearances.itemByName(look), look)
+            body(b, name).appearance = a
+    except Exception as e:
+        print("colours skipped:", e)
 
 
-STEPS = [s_base_prism, s_base_fillet, s_cavity, s_board_seat, s_bosses, s_trim, s_usb, s_window, s_feet, s_inserts,
-         s_lid, s_lid_fillet, s_lid_holes, s_tidy]
+STEPS = [s_base_prism, s_base_fillet, s_cavity, s_board_seat, s_bosses, s_bay_block, s_clip, s_trim, s_usb, s_bay,
+         s_feet, s_inserts, s_lid, s_lid_fillet, s_lid_holes, s_diffuser, s_baffle, s_strip_ref, s_tidy]
 
 
 def clear(design):
@@ -417,13 +571,12 @@ def clear(design):
 
 
 def build(design, first=0, last=None):
-    """Runs STEPS[first..last] (all by default); returns the Base and Lid bodies (None if not built yet)."""
+    """Runs STEPS[first..last] (all by default); returns {name: body} of the bodies built so far."""
     _ops()
     b = Builder(design)
     for step in STEPS[first:(len(STEPS) if last is None else last + 1)]:
         step(b)
-    names = [b.root.bRepBodies.item(i).name for i in range(b.root.bRepBodies.count)]
-    return (body(b, "Base") if "Base" in names else None), (body(b, "Lid") if "Lid" in names else None)
+    return {b.root.bRepBodies.item(i).name: b.root.bRepBodies.item(i) for i in range(b.root.bRepBodies.count)}
 
 
 def run(context):
@@ -442,20 +595,22 @@ def run(context):
                                                    adsk.core.MessageBoxButtonTypes.OKCancelButtonType) != 0:
             return
         clear(design)
-        base, lid = build(design)
+        bodies = build(design)
 
         if EXPORT_STL:
             try:
                 out = os.path.dirname(os.path.abspath(__file__))
                 em = design.exportManager
-                for bd, name in ((base, "base"), (lid, "lid")):
-                    opt = em.createSTLExportOptions(bd, os.path.join(out, name + ".stl"))
+                for name in ("Base", "Lid", "Diffuser", "Baffle"):
+                    opt = em.createSTLExportOptions(bodies[name], os.path.join(out, name.lower() + ".stl"))
                     opt.meshRefinement = adsk.fusion.MeshRefinementSettings.MeshRefinementMedium
                     em.execute(opt)
             except Exception:
                 pass
         app.activeViewport.fit()
-        ui.messageBox("Done: bodies 'Base' and 'Lid'.\n\nBox %.0f mm wide at the front, %.0f at the back, %.0f deep; "
+        ui.messageBox("Done: bodies 'Base', 'Lid', 'Diffuser' (white PLA) and 'Baffle' (black PLA); "
+                      "'Strip (reference)' only shows the LED strip.\n\n"
+                      "Box %.0f mm wide at the front, %.0f at the back, %.0f deep; "
                       "%.0f mm high at the front, %.0f at the back.\n"
                       "Screws: 4 x M2 x 5 into M2 heat-set inserts (hole %.1f mm, %.1f mm long)."
                       % (W_FRONT, W_REAR, DEPTH, H_FRONT, H_REAR, INS_D, INS_DEPTH))
