@@ -2,7 +2,7 @@
 Token LED enclosure for Fusion 360 (script), concept "A": a wedge with a trapezoid footprint.
 Wide and tall at the front (7-LED light window), narrower and lower at the back (controller + USB-C).
 
-  front: the 7-LED strip (50 x 10 mm) in a bay behind the front, its wires go back through a slot in the bay's back wall;
+  front: the 7-LED strip (50 x 9.84 mm) in a bay behind the front, its wires go back through a slot in the bay's back wall;
          a light baffle (black PLA) with one cell per LED in front of it, and a diffuser plate (white PLA) that slides
          down from the top, flush with the front face
   back : the ESP32-C3 SuperMini Plus with its USB-C opening
@@ -38,17 +38,18 @@ USB_SLOT_H = 5.2
 # that fills the opening in the front face (flush) and a wider back plate that reaches behind the lips at the sides and
 # the bottom, so it cannot fall out forwards. It slides down from the top; the lid holds it.
 STRIP_LEN = 50.0
-STRIP_W = 10.0
+STRIP_W = 9.84
 STRIP_PCB = 0.5         # strip with its adhesive tape, without the LEDs
+STRIP_END = 2.0         # free room beside each end of the strip (wires)
 LED_N = 7
-LED_SIZE = 5.0
-LED_GAP = 1.3           # between two LEDs (pitch = LED_SIZE + LED_GAP)
+LED_SIZE = 4.97         # LED body (4.97 along the strip, 4.96 across it; 6.53 across with its legs)
+LED_GAP = 2.08          # between two LEDs (pitch = LED_SIZE + LED_GAP)
 LED_H = 1.6             # LED height above the strip
 LED_X0 = 0.0            # centre of the LED row from the strip's centre (+X = right, seen from the front)
 AIR = 4.0               # LED tops to the diffuser (depth of the baffle's cells)
 BAY_WALL = 1.6
 BAND_Z0 = 6.5           # bottom of the diffuser band on the front; the strip stands on the bay floor at this height
-BAND_HW = 26.4          # half width of the band
+BAND_HW = 28.0          # half width of the band
 LIP = 0.8               # lips in front of the diffuser's back plate = thickness of its front plate
 DIFF_T2 = 0.8           # diffuser back plate (the diffuser is LIP + DIFF_T2 thick)
 TONGUE = 1.2            # how far the back plate reaches behind the lips
@@ -59,11 +60,11 @@ WIRE_Z = 4.0            # slot bottom above the bay floor
 # Light baffle (separate part, black PLA) between the strip and the diffuser: one cell per LED, so every LED lights only its
 # own segment of the diffuser. Its walls reach into the gaps between the LEDs (that also centres it on them) and its top
 # bar reaches over the strip's top edge. It drops into the bay after the strip.
-BAFFLE_T = 1.0          # cell wall thickness (must fit LED_GAP)
+BAFFLE_CLR = 0.35       # play on each side of a cell wall between two LEDs (wall = LED_GAP - 2 x BAFFLE_CLR)
 CELL_H = 8.0            # cell height, centred on the LEDs
 
 # Box
-W_FRONT = 70.0          # width at the front
+W_FRONT = 74.0          # width at the front
 W_REAR = 36.0           # width at the back
 DEPTH = 52.0
 H_FRONT = 22.0          # height at the front (top surface)
@@ -124,8 +125,14 @@ def groove_y():
     return LIP + DIFF_T2 + DIFF_CLR
 
 
+def front_flat_hw():
+    """Half width of the flat part of the front face (the acute front corners are rounded with R_FRONT)."""
+    a = math.atan2(DEPTH, (W_FRONT - W_REAR) / 2.0)
+    return half_w(0) - R_FRONT / math.tan(a / 2.0)
+
+
 def bay_hl():
-    return STRIP_LEN / 2.0 + 0.4
+    return STRIP_LEN / 2.0 + STRIP_END
 
 
 def strip_t():
@@ -147,6 +154,11 @@ def baffle_x():
     """Centres of the baffle's cell walls: between the LEDs and one beyond each end."""
     p = LED_SIZE + LED_GAP
     return [LED_X0 + (k - LED_N / 2.0) * p for k in range(LED_N + 1)]
+
+
+def baffle_t():
+    """Cell wall thickness."""
+    return LED_GAP - 2 * BAFFLE_CLR
 
 
 def board_y():
@@ -180,16 +192,20 @@ def check_layout():
         bad.append("Diffuser band too low: raise BAND_Z0.")
     if BAND_HW < bay_hl() + 0.5:
         bad.append("Diffuser band narrower than the LED bay: raise BAND_HW.")
+    if BAND_HW + 0.3 > front_flat_hw():
+        bad.append("Diffuser band reaches the rounded front corners: raise W_FRONT or lower BAND_HW.")
     if BAND_HW + TONGUE + 1.0 > half_w(0) - R_FRONT:
         bad.append("Diffuser groove runs into the rounded front corners: raise W_FRONT or lower BAND_HW.")
     fx = half_w(BOSS_Y_FRONT) - BOSS_INSET
     if fx - INS_D / 2.0 - bay_hl() < 1.2:
         bad.append("Front insert too close to the LED bay: raise W_FRONT.")
-    if BAFFLE_T > LED_GAP - 0.2:
-        bad.append("Baffle walls do not fit between the LEDs: lower BAFFLE_T.")
+    if baffle_t() < 0.8:
+        bad.append("Baffle walls too thin to print: lower BAFFLE_CLR.")
+    if abs(LED_X0) + (LED_N * LED_SIZE + (LED_N - 1) * LED_GAP) / 2.0 > STRIP_LEN / 2.0:
+        bad.append("The LED row is longer than the strip: check STRIP_LEN, LED_SIZE, LED_GAP and LED_X0.")
     xs = baffle_x()
-    if xs[0] - BAFFLE_T / 2.0 < -bay_hl() + 0.5 or xs[-1] + BAFFLE_T / 2.0 > bay_hl() - 2.0:
-        bad.append("The LED row (and the baffle) does not fit the bay, or leaves no room for the wires at the +X end.")
+    if xs[0] - baffle_t() / 2.0 < -bay_hl() + 0.5 or xs[-1] + baffle_t() / 2.0 > bay_hl() - 0.5:
+        bad.append("The baffle does not fit the bay: raise STRIP_END.")
     if under_z(bay_y1()) - 0.2 - (BAND_Z0 + STRIP_W + 0.1) < 1.0:
         bad.append("No room for the baffle's top bar over the strip: raise H_FRONT or lower BAND_Z0.")
     if usb_zc() + USB_SLOT_H / 2.0 > under_z(DEPTH) - 0.8:
@@ -511,21 +527,22 @@ def s_baffle(b):
     # separate part: a block from the diffuser to the LED tops with one cell per LED, the walls between the LEDs reach on
     # towards the strip, the top bar reaches over the strip's top edge; its top follows the lid 0.2 mm below
     xs = baffle_x()
-    x0, x1 = xs[0] - BAFFLE_T / 2.0, xs[-1] + BAFFLE_T / 2.0
+    t = baffle_t()
+    x0, x1 = xs[0] - t / 2.0, xs[-1] + t / 2.0
     yf = LIP + DIFF_T2 + 0.05                  # against the diffuser
-    yb = bay_y1() - strip_t() - 0.2            # just in front of the LED tops
+    yb = bay_y1() - strip_t() - 0.3            # just in front of the LED tops
     zs = BAND_Z0 + STRIP_W + 0.1               # above the strip
     f = b.rects_extrude(b.xy_plane(BAND_Z0), [(x0, yf, BAND_Z0, x1, yb, BAND_Z0)], New, height=20)
     f.bodies.item(0).name = "Baffle"
     b.rects_extrude(b.xy_plane(zs), [(x0, yb, zs, x1, bay_y1() - 0.2, zs)], Join, height=20, bodies=[body(b, "Baffle")])
-    yw = bay_y1() - STRIP_PCB - 0.3
-    b.rects_extrude(b.xy_plane(BAND_Z0), [(x - BAFFLE_T / 2.0, yb, BAND_Z0, x + BAFFLE_T / 2.0, yw, BAND_Z0)
+    yw = bay_y1() - STRIP_PCB - 0.5            # clear of the solder joints on the strip
+    b.rects_extrude(b.xy_plane(BAND_Z0), [(x - t / 2.0, yb, BAND_Z0, x + t / 2.0, yw, BAND_Z0)
                                           for x in xs[1:-1]], Join, height=STRIP_W + 0.1, bodies=[body(b, "Baffle")])
     b.polygon_extrude(b.root.yZConstructionPlane,
                       [(0, -5, under_z(-5) - 0.2), (0, DEPTH + 5, under_z(DEPTH + 5) - 0.2), (0, DEPTH + 5, 90),
                        (0, -5, 90)], Cut, W_FRONT + 10, bodies=[body(b, "Baffle")])
     zc = BAND_Z0 + STRIP_W / 2.0
-    b.rects_extrude(b.xy_plane(zc), [(xs[k] + BAFFLE_T / 2.0, yf - 1.0, zc, xs[k + 1] - BAFFLE_T / 2.0, yb + 0.5, zc)
+    b.rects_extrude(b.xy_plane(zc), [(xs[k] + t / 2.0, yf - 1.0, zc, xs[k + 1] - t / 2.0, yb + 0.5, zc)
                                      for k in range(LED_N)], Cut, full_len=CELL_H, bodies=[body(b, "Baffle")])
 
 

@@ -138,11 +138,14 @@ It creates the bodies *Base*, *Lid*, *Diffuser* and *Baffle* (plus *Strip (refer
 `python enclosure/plate_p2s.py` turns them into print orientation (`*_P2S.stl`) and one plate file per filament colour:
 `TokenLED_Box_P2S.3mf` (base + lid), `TokenLED_Diffuser_P2S.3mf` (white) and `TokenLED_Baffle_P2S.3mf` (black).
 
-- Wedge with a trapezoid footprint: 70 mm wide at the front, 36 at the back, 52 deep; 22 mm high at the front, 13 at the back.
-- Front: the 7-LED strip (50 x 10 mm) stands on its edge in a bay behind the front, its back stuck to the bay's back wall.
-  The wires go back through a slot at the right end of that wall (open at the top, so they are laid in, not threaded).
-- Light baffle (**black PLA**): one 5.3 x 8 mm cell per LED, so each LED lights only its own segment of the diffuser. Its
-  1 mm walls reach into the 1.3 mm gaps between the LEDs, which also centres it; its top bar holds the strip down.
+- Wedge with a trapezoid footprint: 74 mm wide at the front (68.8 mm across the rounded front corners), 36 at the back,
+  52 deep; 22 mm high at the front, 13 at the back.
+- Front: the 7-LED strip (50 x 9.84 mm) stands on its edge in a bay behind the front, its back stuck to the bay's back wall,
+  with 2 mm of free room at each end. The wires go back through a slot at the right end of that wall (open at the top, so
+  they are laid in, not threaded).
+- Light baffle (**black PLA**): one 5.67 x 8 mm cell per LED, so each LED lights only its own segment of the diffuser. Its
+  1.38 mm walls reach into the 2.08 mm gaps between the LEDs (0.35 mm play on each side), which also centres it; its top bar
+  holds the strip down. It has 1.6 mm of room at each end of the bay, so stick the strip roughly in the middle.
 - Diffuser (**white PLA**, 1.6 mm): it slides down from the top, flush with the front face; its back plate reaches behind
   0.8 mm lips at the sides and the bottom, so it cannot fall out forwards, and the lid holds it down.
 - Back: the ESP32-C3 SuperMini Plus on two rails between fences, its USB-C end in the rear opening (11 x 5.2 mm).
@@ -152,5 +155,5 @@ It creates the bodies *Base*, *Lid*, *Diffuser* and *Baffle* (plus *Strip (refer
 - Assembly: board, strip (wires into the slot), baffle, diffuser, lid.
 - Printing (Bambu Lab P2S, PLA Basic, 0.2 mm Standard, 3 walls, 15 % infill, no supports): the base stands on its bottom,
   the lid lies on its top face, the diffuser on its back plate, the baffle on its front face.
-- The board and strip sizes are assumptions (board 23 x 18 mm; strip 0.5 mm thick with its tape, LEDs 5 x 5 x 1.6 mm with
-  1.3 mm gaps, centred on the strip): measure yours and adjust the parameters.
+- The LEDs are measured (4.97 x 4.96 mm, 2.08 mm gaps, strip 9.84 mm wide). Still assumed: board 23 x 18 mm; strip 50 mm
+  long and 0.5 mm thick with its tape, LEDs 1.6 mm tall and centred on the strip. Measure yours and adjust the parameters.
