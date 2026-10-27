@@ -21,7 +21,7 @@
 #include <Preferences.h>
 #include <Adafruit_NeoPixel.h>
 
-#define LED_PIN     8
+#define LED_PIN     8        // alapértelmezett adatláb (beépített WS2812B); a webes felületen állítható, a LED-szám is
 #define UDP_PORT    4210
 #define HOSTNAME    "tokenled"   // http://tokenled.local
 #define QUEUE_LEN   32
@@ -54,10 +54,15 @@ const char TYPES[] = "tkjir";
 uint32_t rem[5], total[5], flashes[5];
 
 // ---------- Beállítások (webes felület, flash) ----------
-struct Cfg { uint16_t out, in, cache; uint8_t bright; bool glow, saver; } cfg;
+struct Cfg { uint16_t out, in, cache; uint8_t bright; bool glow, saver; uint16_t count; uint8_t pin; } cfg;
+
+// Adatlábnak megengedett GPIO-k: nem a boot (9), USB (18, 19) és UART (20, 21) láb.
+bool pinOk(int p) { return (p >= 0 && p <= 8) || p == 10; }
 
 void loadCfg() {
   prefs.begin("cfg", true);
+  cfg.count  = prefs.getUShort("count", 1);
+  cfg.pin    = prefs.getUChar("pin", LED_PIN);
   cfg.out    = prefs.getUShort("out", 10);
   cfg.in     = prefs.getUShort("in", 100);
   cfg.cache  = prefs.getUShort("cache", 0);
@@ -69,6 +74,8 @@ void loadCfg() {
 
 void saveCfg() {
   prefs.begin("cfg", false);
+  prefs.putUShort("count", cfg.count);
+  prefs.putUChar("pin", cfg.pin);
   prefs.putUShort("out", cfg.out);
   prefs.putUShort("in", cfg.in);
   prefs.putUShort("cache", cfg.cache);
@@ -85,11 +92,26 @@ void applyCfg() {
 }
 
 // ---------- LED ----------
-void led(uint32_t c) {
-  if (c == shown) return;
-  shown = c;
-  px.setPixelColor(0, c);
+// all=true: az összes LED (villanás); all=false: csak az első (állapotjelző pötty, derengés).
+void led(uint32_t c, bool all = true) {
+  if (c == 0) all = true;
+  uint32_t key = c | (all ? 0 : 0x80000000u);
+  if (key == shown) return;
+  shown = key;
+  px.clear();
+  if (all) px.fill(c); else px.setPixelColor(0, c);
   px.show();
+}
+
+// Új LED-szám vagy adatláb: a régi szalag kikapcsol, az új méretre áll át.
+void applyHw() {
+  px.clear();
+  px.show();
+  px.setPin(cfg.pin);
+  px.updateLength(cfg.count);
+  if (!px.numPixels()) { px.updateLength(1); cfg.count = 1; saveCfg(); }   // nem fért a memóriába
+  px.setBrightness(cfg.bright);
+  shown = 1;
 }
 
 uint32_t color(char type) {
@@ -156,7 +178,7 @@ void play() {
     if (cfg.glow && lastMsg && now - lastMsg < ALIVE_MS) c = px.Color(0, 6, 10);
     else if (apOn && dot) c = px.Color(40, 25, 0);
     else if (!netUp && dot) c = px.Color(40, 0, 0);
-    led(c);
+    led(c, false);
     return;
   }
 
@@ -349,6 +371,9 @@ void handleRoot() {
   s += numField("in", dot("#f60") + "Új bemenet: token / villanás", cfg.in, 0, 60000);
   s += numField("cache", dot("#22a") + "Cache olvasás: token / villanás", cfg.cache, 0, 60000);
   s += "<small>0 = nem villog erre a típusra.</small>";
+  s += "<label><span>Rákötött LED-ek száma</span><input type=number name=count min=1 max=65535 list=cnt value=" +
+       String(cfg.count) + "></label><datalist id=cnt><option>1<option>2<option>5<option>10<option>50<option>100</datalist>";
+  s += numField("pin", "LED adatláb (GPIO 0–8, 10; a beépített LED: 8)", cfg.pin, 0, 10);
   s += numField("bright", "Fényerő (1–255)", cfg.bright, 1, 255);
   s += checkField("glow", "Halvány derengés, amíg a Claude fut", cfg.glow);
   s += checkField("saver", "Energiatakarékos WiFi (elemhez; kikapcsolva gyorsabb)", cfg.saver);
@@ -402,7 +427,13 @@ void handleSave() {
   cfg.bright = constrain(http.arg("bright").toInt(), 1, 255);
   cfg.glow   = http.hasArg("glow");
   cfg.saver  = http.hasArg("saver");
+  uint16_t count = constrain(http.arg("count").toInt(), 1, 65535);
+  int pin = http.arg("pin").toInt();
+  bool hw = count != cfg.count || (pinOk(pin) && pin != cfg.pin);
+  cfg.count = count;
+  if (pinOk(pin)) cfg.pin = pin;
   saveCfg();
+  if (hw) applyHw();
   applyCfg();
   redirectHome();
 }
@@ -437,6 +468,10 @@ void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);   // USB nélkül se akadjon meg a kiírás
   loadCfg();
+  if (!pinOk(cfg.pin)) cfg.pin = LED_PIN;
+  px.updateLength(cfg.count);
+  if (!px.numPixels()) { px.updateLength(1); cfg.count = 1; }
+  px.setPin(cfg.pin);
   px.begin();
   px.setBrightness(cfg.bright);
   const uint32_t test[] = {px.Color(255, 0, 0), px.Color(0, 255, 0), px.Color(0, 0, 255), 0};

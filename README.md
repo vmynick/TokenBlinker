@@ -41,6 +41,8 @@ A szöveg/thinking/tool tokeneit generálás közben becsüli (4 karakter ≈ 1 
 
 **Webes felület: http://tokenled.local**: token/villanás típusonként (0 = ki), fényerő, halvány derengés amíg a Claude fut (alapból ki), energiatakarékos WiFi (elemhez; kikapcsolva gyorsabb), színteszt, állapot és tokenszámok bekapcsolás óta, WiFi-hálózat módosítása.
 
+**Rákötött LED-ek:** a webes felületen állítható a LED-ek száma (1-től 65 535-ig) és az adatláb (alap: GPIO8, a beépített LED). Külső WS2812 szalagot másik lábra (pl. GPIO4) kösd, a GND közös legyen, az 5 V a szalag saját tápjáról menjen. Egy villanás minden LED-et felgyújt a típus színével; az állapotjelző pötty és a derengés csak az elsőt. Sok LED sok áramot visz (kb. 60 mA/LED fehéren): szalagnál vedd lejjebb a fényerőt. Minden kirajzolás ~30 µs/LED ideig blokkol, ezért több ezer LED-nél a villanások lassulnak.
+
 **WiFi beállítása (AP mód):** ha nincs mentett hálózat, vagy 30 s alatt nem tud csatlakozni, a LED saját, nyílt hálózatot indít: `TokenLED-xxxx` (a MAC utolsó 4 jegye). Telefonnal rácsatlakozva feljön a beállító oldal (ha nem: http://192.168.4.1), ott kiválasztható a hálózat és megadható a jelszó. Sikeres csatlakozás után az AP eltűnik. Ha a mentett hálózat csak átmenetileg nem elérhető, 3 percenként újrapróbálja, amíg senki nincs az AP-n. USB-n ugyanez: `python token_blinker.py --wifi`.
 
 A maradék nem vész el, átvivődik. Ha sok villanás vár, a LED gyorsít, 300 fölött eldobja a többit. 3 s-onként halvány pötty: piros = WiFi-re csatlakozik, sárga = beállító AP fut; bekapcsoláskor piros-zöld-kék teszt.
