@@ -44,7 +44,8 @@ start of the request.
 Approval: when Claude asks permission for a tool (`control_request` / `can_use_tool` on its output),
 the LED blinks white once per second until the request is answered. The LED forgets it after 5 s without a
 refresh, so a crashed launcher cannot leave it blinking. With several Claude sessions open, answering one
-clears the signal for all.
+clears the signal for all. The launcher also passes Claude's input through (byte for byte) and ends the signal the moment
+your answer (`control_response`) goes in, so the LED stops blinking even while the approved tool is still running.
 
 ## Web page: http://tokenled.local
 

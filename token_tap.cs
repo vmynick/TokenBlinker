@@ -41,9 +41,10 @@ static class TokenTap
             return 2;
         }
 
-        var psi = new ProcessStartInfo(exe, cl.Substring(i)) { UseShellExecute = false, RedirectStandardOutput = true };
+        var psi = new ProcessStartInfo(exe, cl.Substring(i)) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardInput = true };
         Process p = Process.Start(psi);
         KillWithUs(p);
+        new Thread(() => PumpStdin(p)) { IsBackground = true }.Start();
 
         Stream src = p.StandardOutput.BaseStream, dst = Console.OpenStandardOutput();
         var buf = new byte[65536];
@@ -58,6 +59,41 @@ static class TokenTap
         waiting = false;
         if (sender != null) Thread.Sleep(150);   // let the last packets out
         return p.ExitCode;
+    }
+
+    // ---------- Input to claude.exe: passed through byte for byte; the user's answer to an approval ends the wait ----------
+    static readonly MemoryStream inLine = new MemoryStream();
+
+    static void PumpStdin(Process p)
+    {
+        try
+        {
+            Stream inp = Console.OpenStandardInput(), outp = p.StandardInput.BaseStream;
+            var buf = new byte[65536];
+            int n;
+            while ((n = inp.Read(buf, 0, buf.Length)) > 0)
+            {
+                outp.Write(buf, 0, n);
+                outp.Flush();
+                try { ScanInput(buf, n); } catch { }
+            }
+        }
+        catch { }
+        try { p.StandardInput.Close(); } catch { }
+    }
+
+    static void ScanInput(byte[] b, int n)
+    {
+        for (int k = 0; k < n; k++)
+        {
+            if (b[k] == (byte)'\n')
+            {
+                string head = Encoding.UTF8.GetString(inLine.GetBuffer(), 0, (int)inLine.Length);
+                if (head.IndexOf("\"control_response\"", StringComparison.Ordinal) >= 0) waiting = false;   // approved or denied
+                inLine.SetLength(0);
+            }
+            else if (inLine.Length < 400) inLine.WriteByte(b[k]);
+        }
     }
 
     // One Windows command-line token (the program name and a path: quoted, or up to the next space).
