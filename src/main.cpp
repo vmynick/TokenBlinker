@@ -83,7 +83,7 @@ enum { IDLE, ON, OFF } state = IDLE;
 uint32_t until = 0;
 char curType = 0;
 uint32_t shown = 1;   // last colour written; 1 = nothing yet
-int shownT = -9;      // last strip target written
+int shownT = -9, shownFn = -9;      // last strip target written
 bool shownF = false;  // last write was a token flash
 
 const char TYPES[] = "tkjir";
@@ -96,7 +96,8 @@ struct Cfg {
   uint16_t out, in, cache, count;
   uint8_t bright, pin, onb;   // pin: strip data pin; onb: onboard LED 0 = mirror, 1 = status only, 2 = off
   bool glow, saver;
-  bool doneSig, hist, night, mq;
+  bool doneSig, hist, night, mq, onbSig, onbUse;   // onbSig: finished/error on the onboard LED; onbUse: idle colour shows usage
+  uint8_t onbMask, onbBr;   // onboard LED: shown functions (bit 0-4 types, 5 approval), brightness in percent
   uint8_t meter, nFrom, nTo, nBright;   // meter: 0 off, 1 five-hour, 2 weekly; night hours 0-23
   uint16_t mqPort, remind;   // remind: seconds of pending approval until the blink speeds up (0 = off)
   String tz, mqHost, mqUser, mqPass, mqTopic;
@@ -155,6 +156,10 @@ void loadCfg() {
   cfg.nBright = prefs.getUChar("nbr", 5);
   cfg.tz     = prefs.getString("tz", "CET-1CEST,M3.5.0,M10.5.0/3");
   cfg.remind = prefs.getUShort("remind", 45);
+  cfg.onbMask = prefs.getUChar("onbmask", 0x3F);
+  cfg.onbBr  = prefs.getUChar("onbbr", 100);
+  cfg.onbSig = prefs.getBool("onbsig", true);
+  cfg.onbUse = prefs.getBool("onbuse", false);
   cfg.mq     = prefs.getBool("mq", false);
   cfg.mqHost = prefs.getString("mqhost", "");
   cfg.mqPort = prefs.getUShort("mqport", 1883);
@@ -189,6 +194,10 @@ void saveCfg() {
   prefs.putUChar("nbr", cfg.nBright);
   prefs.putString("tz", cfg.tz);
   prefs.putUShort("remind", cfg.remind);
+  prefs.putUChar("onbmask", cfg.onbMask);
+  prefs.putUChar("onbbr", cfg.onbBr);
+  prefs.putBool("onbsig", cfg.onbSig);
+  prefs.putBool("onbuse", cfg.onbUse);
   prefs.putBool("mq", cfg.mq);
   prefs.putString("mqhost", cfg.mqHost);
   prefs.putUShort("mqport", cfg.mqPort);
@@ -221,7 +230,7 @@ void applyBright() {
   if (b == appliedB) return;
   appliedB = b;
   px.setBrightness(b);
-  ob.setBrightness(b);
+  ob.setBrightness((uint32_t)b * cfg.onbBr / 100);
   shown = 1;   // new brightness: force the next colour to be written
 }
 
@@ -371,13 +380,17 @@ void drawStrip(uint32_t c, int f) {
 // target: function 0-5 (type or approval: its LEDs on the strip), -1 = all strip LEDs,
 //         -2 = status (first strip LED, only when the onboard LED is off), -3 = onboard LED only (history mode).
 // flash: a token flash (the onboard LED may be set to show status only).
-void led(uint32_t c, int target = -1, bool flash = false) {
+// fn: what is shown, for the onboard LED's filter: 0-4 type, 5 approval, 6 finished/error signal, -1 other.
+void led(uint32_t c, int target = -1, bool flash = false, int fn = -1) {
   if (c == 0) target = -1;
-  if (c == shown && target == shownT && flash == shownF) return;
+  if (c == shown && target == shownT && flash == shownF && fn == shownFn) return;
+  shownFn = fn;
   shown = c;
   shownT = target;
   shownF = flash;
   bool obOn = cfg.onb == 0 || (cfg.onb == 1 && !flash);
+  if (obOn && cfg.onb == 0 && fn >= 0 && fn <= 5 && !(cfg.onbMask >> fn & 1)) obOn = false;   // this function is not shown on the onboard LED
+  if (obOn && fn == 6 && !cfg.onbSig) obOn = false;
   ob.setPixelColor(0, obOn ? c : 0);
   ob.show();
   if (!px.numPixels()) return;
@@ -484,7 +497,7 @@ void play() {
     hcur = 0;
     state = IDLE;
     uint32_t per = cfg.remind && now - waitStart > cfg.remind * 1000UL ? 125 : 250;   // faster once it has waited a while
-    if (now / per % 2 == 0) led(rgb(5), 5);
+    if (now / per % 2 == 0) led(rgb(5), 5, false, 5);
     else led(0);
     return;
   }
@@ -505,13 +518,13 @@ void play() {
       sigUntil = now + (sigErr ? 2000 : 1500);
     }
     if (sigUntil && (int32_t)(now - sigUntil) < 0) {      // finished (solid green) / error (red blinking)
-      if (!sigErr || now / 250 % 2 == 0) led(sigErr ? COL_ERR : COL_OK, -1);
+      if (!sigErr || now / 250 % 2 == 0) led(sigErr ? COL_ERR : COL_OK, -1, false, 6);
       else led(0);
       return;
     }
     sigUntil = 0;
     if (waitUntil && (int32_t)(now - waitUntil) < 0) {     // Claude waits for approval: white blink
-      if (now / 500 % 2 == 0) led(rgb(5), 5);
+      if (now / 500 % 2 == 0) led(rgb(5), 5, false, 5);
       else led(0);
       return;
     }
@@ -520,6 +533,8 @@ void play() {
     if (cfg.glow && lastMsg && now - lastMsg < ALIVE_MS) c = px.Color(0, 6, 10);
     else if (apOn && dot) c = px.Color(40, 25, 0);
     else if (!netUp && dot) c = px.Color(40, 0, 0);
+    else if (cfg.onbUse && useAt && now - useAt < USE_MS && use5 >= 0)       // idle colour = 5-hour usage
+      c = use5 < 60 ? px.Color(0, 8, 0) : use5 < 85 ? px.Color(12, 8, 0) : px.Color(16, 0, 0);
     led(c, -2);
     return;
   }
@@ -528,7 +543,7 @@ void play() {
   curType = it.type;
   bool hm = histMode();
   if (hm) hcur = color(curType);
-  led(color(curType), hm ? -3 : typeIdx(curType), true);
+  led(color(curType), hm ? -3 : typeIdx(curType), true, typeIdx(curType));
   flashes[typeIdx(curType)]++;
   if (--it.n == 0) { qHead = (qHead + 1) % QUEUE_LEN; qCount--; }
   pending--;
@@ -962,6 +977,14 @@ void handleRoot() {
   http.send(200, "text/html; charset=utf-8", s);
 }
 
+// Remembers which collapsible sections are open (per browser).
+String secJs(const char* key) {
+  return String("<script>(()=>{const d=document.querySelectorAll('details.sec');let o=[];"
+                "try{o=JSON.parse(localStorage.getItem('") + key + "')||'null')||[];}catch(e){}"
+                "d.forEach((e,i)=>{if(o.length)e.open=!!o[i];e.addEventListener('toggle',()=>{"
+                "try{localStorage.setItem('" + key + "',JSON.stringify([...d].map(x=>x.open)));}catch(e){}});});})();</script>";
+}
+
 void handleSettings() {
   String s = page(1);
   if (http.hasArg("saved")) s += "<p class=ok>Saved.</p>";
@@ -976,8 +999,16 @@ void handleSettings() {
   s += checkField("done", "Signal when Claude finishes (green) or fails (red)", cfg.doneSig);
   s += numField("remind", "Approval blink gets faster after (s, 0 = off)", cfg.remind, 0, 3600);
 
+  s += "</details><details class=sec><summary>Onboard LED (GPIO8)</summary>";
+  s += selField("onb", "Mode", cfg.onb, {"mirror (selected functions)", "status + approval only", "off"});
+  s += "<label><span>Brightness (%)</span><input type=number name=onbbr min=1 max=100 value=" + String(cfg.onbBr) + "></label>";
+  s += "<small>Mirror shows these functions:</small>";
+  for (int i = 0; i < 6; i++)
+    s += String("<label><span>") + dot(hex(i)) + NAMES[i] + "</span><input type=checkbox name=onbm" + i + (cfg.onbMask >> i & 1 ? " checked" : "") + "></label>";
+  s += checkField("onbsig", "Show the finished (green) / error (red) signal", cfg.onbSig);
+  s += checkField("onbuse", "Idle colour shows the 5-hour usage (green / yellow / red)", cfg.onbUse);
+  s += "<small>Status dots (connecting, setup network) are always shown unless the mode is off.</small>";
   s += "</details><details class=sec><summary>LEDs and colours</summary>";
-  s += selField("onb", "Onboard LED (GPIO8)", cfg.onb, {"mirror everything", "status + approval only", "off"});
   s += "<label><span>External strip: LEDs</span><input type=number name=count min=0 max=65535 list=cnt value=" +
        String(cfg.count) + "></label><datalist id=cnt><option>0<option>1<option>2<option>5<option>6<option>10<option>50<option>100</datalist>";
   s += numField("pin", "External strip data pin (GPIO 0–7, 10)", cfg.pin, 0, 10);
@@ -1013,30 +1044,28 @@ void handleSettings() {
        "Home Assistant finds the sensors by itself (MQTT discovery). A missing broker never affects the LED.</small>";
 
   s += "</details><button>Save</button></form><form method=post action=/test><button>Colour test</button></form>";
-  s += F("<script>const d=document.querySelectorAll('details.sec');let o=[];"
-         "try{o=JSON.parse(localStorage.getItem('open')||'null')||[];}catch(e){}"
-         "d.forEach((e,i)=>{if(o.length)e.open=!!o[i];e.addEventListener('toggle',()=>{"
-         "try{localStorage.setItem('open',JSON.stringify([...d].map(x=>x.open)));}catch(e){}});});</script>");
+  s += secJs("open");
   http.send(200, "text/html; charset=utf-8", s);
 }
 
 void handleSystem() {
   String s = page(2);
-  s += "<h3>WiFi</h3>";
+  s += "<details class=sec open><summary>WiFi</summary>";
   if (apOn) s += "<p>Setup network running: " + apName + "</p>";
   s += wifiForm();
   s += "<small>If it cannot connect within 30 s, the setup network starts: " + apName + "</small>";
-  s += "<h3>Firmware update</h3><form method=post action=/update enctype=multipart/form-data>"
+  s += "</details><details class=sec><summary>Firmware update</summary><form method=post action=/update enctype=multipart/form-data>"
        "<input type=file name=fw accept=.bin required style=width:100%><br><button>Upload and restart</button></form>"
        "<small>Pick <b>.pio/build/supermini/firmware.bin</b>. The page has no password: anyone on your network can open it.</small>";
-  s += "<h3>Backup</h3><a href=/config.json>Download settings</a> <small>(WiFi and MQTT password are not included)</small>"
+  s += "</details><details class=sec><summary>Backup</summary><a href=/config.json>Download settings</a> <small>(WiFi and MQTT password are not included)</small>"
        "<br><input type=file id=imp accept=.json style=width:100%><small>Pick a settings file to restore it.</small>"
        "<script>$=i=>document.getElementById(i);$('imp').onchange=e=>{const f=e.target.files[0];if(!f)return;"
        "f.text().then(t=>fetch('/import',{method:'POST',body:t,headers:{'Content-Type':'text/plain'}}))"
        ".then(r=>r.text()).then(m=>{alert(m);location.href='/settings';});};</script>";
-  s += "<h3>Device</h3><table><tr><td>Free memory</td><td>" + String(ESP.getFreeHeap() / 1024) + " kB</td></tr>"
+  s += "</details><details class=sec><summary>Device</summary><table><tr><td>Free memory</td><td>" + String(ESP.getFreeHeap() / 1024) + " kB</td></tr>"
        "<tr><td>Clock</td><td>" + (timeOk() ? "set" : "not set") + "</td></tr>"
        "<tr><td>MQTT</td><td>" + (!cfg.mq ? "off" : mqOk ? "connected" : "not connected") + "</td></tr></table>";
+  s += "</details>" + secJs("open2");
   http.send(200, "text/html; charset=utf-8", s);
 }
 
@@ -1087,6 +1116,11 @@ void applySettings(const ArgFn& arg, const HasFn& has) {
   cfg.count = count;
   if (pinOk(pin)) cfg.pin = pin;
 
+  cfg.onbBr = constrain(arg("onbbr").toInt(), 1, 100);
+  cfg.onbMask = 0;
+  for (int i = 0; i < 6; i++) if (has(String("onbm") + i)) cfg.onbMask |= 1 << i;
+  cfg.onbSig = has("onbsig");
+  cfg.onbUse = has("onbuse");
   cfg.hist  = has("hist");
   cfg.meter = constrain(arg("meter").toInt(), 0, 2);
   memset(hist, 0, sizeof(hist));
@@ -1135,7 +1169,8 @@ String exportJson() {
   auto txt = [&](const String& k, const String& v) { s += "\"" + k + "\":" + jq(v) + ",\n"; };
   num("out", cfg.out); num("in", cfg.in); num("cache", cfg.cache); num("bright", cfg.bright);
   flag("glow", cfg.glow); flag("saver", cfg.saver); flag("done", cfg.doneSig); num("remind", cfg.remind);
-  num("onb", cfg.onb); num("count", cfg.count); num("pin", cfg.pin);
+  num("onb", cfg.onb); num("onbbr", cfg.onbBr); flag("onbsig", cfg.onbSig); flag("onbuse", cfg.onbUse);
+  for (int i = 0; i < 6; i++) flag((String("onbm") + i).c_str(), cfg.onbMask >> i & 1); num("count", cfg.count); num("pin", cfg.pin);
   flag("hist", cfg.hist); num("meter", cfg.meter);
   flag("night", cfg.night); num("nfrom", cfg.nFrom); num("nto", cfg.nTo); num("nbr", cfg.nBright); txt("tz", cfg.tz);
   flag("mq", cfg.mq); txt("mqhost", cfg.mqHost); num("mqport", cfg.mqPort); txt("mquser", cfg.mqUser); txt("mqtopic", cfg.mqTopic);

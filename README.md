@@ -123,4 +123,8 @@ USB only: `W <ssid>\t<password>`, `?` → `IP <address>` / `NOWIFI`.
 - **Recent events** on the Live page (updates live): started working, approval asked/answered, finished/error, usage reaching 60/85/100 %.
 - **Settings in collapsible sections** (flashes, LEDs and colours, strip display, night and time, MQTT); the browser remembers which are open.
 
+- **Onboard LED section** (Settings): mode (mirror / status + approval only / off), its own brightness, which functions it mirrors
+  (per type and approval), finished/error signal on or off, and an idle colour that follows the 5-hour usage.
+- The **System** page is sectioned too (WiFi, firmware update, backup, device).
+
 New protocol lines: `D 0` / `D 1` (turn finished / error), `U <5h%> <7d%>` (usage, -1 = unknown).
