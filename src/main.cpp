@@ -1,4 +1,5 @@
-// Claude token LED — ESP32-C3 SuperMini Plus, onboard WS2812B (GPIO8) or an external WS2812 strip.
+// Claude token LED — ESP32-C3 SuperMini Plus: onboard WS2812B (GPIO8) plus an optional external WS2812 strip
+// on its own data pin (default GPIO4), so the two can be used together or separately.
 // The PC sends raw token counts, the ESP turns them into flashes. Settings: http://tokenled.local
 // Without WiFi (nothing saved, or no connection within 30 s) a setup AP "TokenLED-xxxx" starts:
 // open network, phones open the setup page by themselves (http://192.168.4.1).
@@ -10,6 +11,7 @@
 //   "W <ssid>\t<pass>"    set WiFi (USB only), saved to flash; reply: "IP <address>"
 //   "?"                   status (USB only): "IP <address>" or "NOWIFI"
 // LED: red-green-blue test at power-on; a dim dot every 3 s = connecting (red) / setup AP running (yellow).
+// Onboard LED: mirrors everything (default), shows status/approval only, or is off. The strip shows the flashes.
 // Library: Adafruit NeoPixel
 
 #include <Arduino.h>
@@ -21,7 +23,8 @@
 #include <Preferences.h>
 #include <Adafruit_NeoPixel.h>
 
-#define LED_PIN     8        // default data pin (onboard WS2812B); pin and LED count are set on the web page
+#define LED_PIN     8        // onboard WS2812B (fixed)
+#define STRIP_PIN   4        // default data pin of the external strip; pin and LED count are set on the web page
 #define UDP_PORT    4210
 #define HOSTNAME    "tokenled"   // http://tokenled.local
 #define QUEUE_LEN   32
@@ -32,7 +35,8 @@
 #define AP_RETRY_MS 180000  // in AP mode, retry the saved WiFi after this long if nobody joined the AP
 #define AUTO        0xFFFF  // LED assignment: automatic
 
-Adafruit_NeoPixel px(1, LED_PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel ob(1, LED_PIN, NEO_GRB + NEO_KHZ800);        // onboard LED
+Adafruit_NeoPixel px(0, STRIP_PIN, NEO_GRB + NEO_KHZ800);      // external strip (none until a count is set)
 WiFiUDP udp;
 WebServer http(80);
 DNSServer dns;
@@ -51,7 +55,8 @@ enum { IDLE, ON, OFF } state = IDLE;
 uint32_t until = 0;
 char curType = 0;
 uint32_t shown = 1;   // last colour written; 1 = nothing yet
-int shownT = -9;      // last target written
+int shownT = -9;      // last strip target written
+bool shownF = false;  // last write was a token flash
 
 const char TYPES[] = "tkjir";
 const char* NAMES[] = {"Text", "Thinking", "Tool", "New input", "Cache", "Approval"};
@@ -61,18 +66,19 @@ uint32_t rem[5], total[5], flashes[5];
 // ---------- Settings (web page, flash) ----------
 struct Cfg {
   uint16_t out, in, cache, count;
-  uint8_t bright, pin;
+  uint8_t bright, pin, onb;   // pin: strip data pin; onb: onboard LED 0 = mirror, 1 = status only, 2 = off
   bool glow, saver;
   uint16_t tgt[6];   // LED per type (+ approval): 0 = all LEDs, n = LED n (1-based), AUTO = automatic
 } cfg;
 
-// Allowed data pins: not the boot (9), USB (18, 19) or UART (20, 21) pins.
-bool pinOk(int p) { return (p >= 0 && p <= 8) || p == 10; }
+// Allowed strip pins: not the onboard LED (8), boot (9), USB (18, 19) or UART (20, 21) pins.
+bool pinOk(int p) { return (p >= 0 && p <= 7) || p == 10; }
 
 void loadCfg() {
   prefs.begin("cfg", true);
-  cfg.count  = prefs.getUShort("count", 1);
-  cfg.pin    = prefs.getUChar("pin", LED_PIN);
+  cfg.count  = prefs.getUShort("scount", 0);
+  cfg.pin    = prefs.getUChar("spin", STRIP_PIN);
+  cfg.onb    = prefs.getUChar("onb", 0);
   cfg.out    = prefs.getUShort("out", 10);
   cfg.in     = prefs.getUShort("in", 100);
   cfg.cache  = prefs.getUShort("cache", 0);
@@ -85,8 +91,9 @@ void loadCfg() {
 
 void saveCfg() {
   prefs.begin("cfg", false);
-  prefs.putUShort("count", cfg.count);
-  prefs.putUChar("pin", cfg.pin);
+  prefs.putUShort("scount", cfg.count);
+  prefs.putUChar("spin", cfg.pin);
+  prefs.putUChar("onb", cfg.onb);
   prefs.putUShort("out", cfg.out);
   prefs.putUShort("in", cfg.in);
   prefs.putUShort("cache", cfg.cache);
@@ -99,30 +106,37 @@ void saveCfg() {
 
 void applyCfg() {
   px.setBrightness(cfg.bright);
+  ob.setBrightness(cfg.bright);
   shown = 1;   // new brightness: force the next colour to be written
   if (!apOn) WiFi.setSleep(cfg.saver);
 }
 
 // ---------- LED ----------
-// target: -1 = all LEDs (flash), -2 = first LED only (status dot, glow), n >= 0 = that LED.
-void led(uint32_t c, int target = -1) {
+// target (strip): -1 = all LEDs, -2 = status (first LED, only when the onboard LED is off), n >= 0 = that LED.
+// flash: a token flash (the onboard LED may be set to show status only).
+void led(uint32_t c, int target = -1, bool flash = false) {
   if (c == 0) target = -1;
-  if (c == shown && target == shownT) return;
+  if (c == shown && target == shownT && flash == shownF) return;
   shown = c;
   shownT = target;
+  shownF = flash;
+  bool obOn = cfg.onb == 0 || (cfg.onb == 1 && !flash);
+  ob.setPixelColor(0, obOn ? c : 0);
+  ob.show();
+  if (!px.numPixels()) return;
+  if (target == -2 && cfg.onb != 2) c = 0;
   px.clear();
-  if (target == -1) px.fill(c);
-  else px.setPixelColor(target == -2 ? 0 : target, c);
+  if (target == -1) px.fill(c); else px.setPixelColor(target == -2 ? 0 : target, c);
   px.show();
 }
 
-// New LED count or data pin: switch the old strip off and resize.
+// New strip length or data pin: switch the old strip off and resize.
 void applyHw() {
   px.clear();
   px.show();
   px.setPin(cfg.pin);
   px.updateLength(cfg.count);
-  if (!px.numPixels()) { px.updateLength(1); cfg.count = 1; saveCfg(); }   // did not fit in memory
+  if (cfg.count && !px.numPixels()) { cfg.count = 0; saveCfg(); }   // did not fit in memory
   px.setBrightness(cfg.bright);
   shown = 1;
 }
@@ -216,7 +230,7 @@ void play() {
 
   Item& it = q[qHead];
   curType = it.type;
-  led(color(curType), targetFor(typeIdx(curType)));
+  led(color(curType), targetFor(typeIdx(curType)), true);
   flashes[typeIdx(curType)]++;
   if (--it.n == 0) { qHead = (qHead + 1) % QUEUE_LEN; qCount--; }
   pending--;
@@ -359,7 +373,7 @@ const char PAGE_HEAD[] PROGMEM = R"(<!doctype html><html lang=en><meta charset=u
 <style>body{font:15px system-ui,sans-serif;max-width:480px;margin:16px auto;padding:0 16px;background:#141414;color:#ddd}
 h2{margin:8px 0 16px}h3{margin:24px 0 8px;font-size:15px;color:#999}a{color:#6bf}
 label{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:10px 0}
-input:not([type=checkbox]){width:90px;padding:4px;background:#222;color:#eee;border:1px solid #444;border-radius:4px}
+input:not([type=checkbox]),select{width:90px;padding:4px;background:#222;color:#eee;border:1px solid #444;border-radius:4px}
 input[name=ssid],input[name=pass]{width:180px}
 button{padding:8px 16px;margin:12px 8px 0 0;background:#333;color:#eee;border:1px solid #555;border-radius:6px}
 .d{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:3px}
@@ -412,15 +426,19 @@ void handleRoot() {
   s += checkField("saver", "Power-saving WiFi (for battery; off = faster)", cfg.saver);
 
   s += "<h3>LEDs</h3>";
-  s += "<label><span>Attached LEDs</span><input type=number name=count min=1 max=65535 list=cnt value=" +
-       String(cfg.count) + "></label><datalist id=cnt><option>1<option>2<option>5<option>6<option>10<option>50<option>100</datalist>";
-  s += numField("pin", "Data pin (GPIO 0–8, 10; onboard LED: 8)", cfg.pin, 0, 10);
+  s += String("<label><span>Onboard LED (GPIO8)</span><select name=onb>") +
+       "<option value=0" + (cfg.onb == 0 ? " selected" : "") + ">mirror everything</option>" +
+       "<option value=1" + (cfg.onb == 1 ? " selected" : "") + ">status + approval only</option>" +
+       "<option value=2" + (cfg.onb == 2 ? " selected" : "") + ">off</option></select></label>";
+  s += "<label><span>External strip: LEDs</span><input type=number name=count min=0 max=65535 list=cnt value=" +
+       String(cfg.count) + "></label><datalist id=cnt><option>0<option>1<option>2<option>5<option>6<option>10<option>50<option>100</datalist>";
+  s += numField("pin", "External strip data pin (GPIO 0–7, 10)", cfg.pin, 0, 10);
   for (int i = 0; i < 6; i++) {
     s += String("<label><span>") + dot(COLORS[i]) + NAMES[i] + " LED</span><input type=number name=g" + i +
          " min=0 max=65534 placeholder=auto value=" + (cfg.tgt[i] == AUTO ? String("") : String(cfg.tgt[i])) + "></label>";
   }
-  s += "<small>LED number (1 = first), 0 = all LEDs, empty = auto: with 5+ LEDs every type has its own LED "
-       "(approval: the 6th), otherwise all LEDs flash together.</small>";
+  s += "<small>Applies to the external strip. LED number (1 = first), 0 = all LEDs, empty = auto: with 5+ LEDs every "
+       "type has its own LED (approval: the 6th), otherwise all LEDs flash together.</small>";
   s += "<br><button>Save</button></form><form method=post action=/test><button>Colour test</button></form>";
 
   s += "<h3>Status</h3><table>";
@@ -480,7 +498,8 @@ void handleSave() {
     a.trim();
     cfg.tgt[i] = a.length() ? constrain(a.toInt(), 0, 65534) : AUTO;
   }
-  uint16_t count = constrain(http.arg("count").toInt(), 1, 65535);
+  uint16_t count = constrain(http.arg("count").toInt(), 0, 65535);
+  cfg.onb = constrain(http.arg("onb").toInt(), 0, 2);
   int pin = http.arg("pin").toInt();
   bool hw = count != cfg.count || (pinOk(pin) && pin != cfg.pin);
   cfg.count = count;
@@ -523,10 +542,12 @@ void setup() {
   Serial.setTxTimeoutMs(0);   // never block on output when no USB host is attached
   loadCfg();
   if (!pinOk(cfg.pin)) cfg.pin = LED_PIN;
-  px.updateLength(cfg.count);
-  if (!px.numPixels()) { px.updateLength(1); cfg.count = 1; }
   px.setPin(cfg.pin);
+  px.updateLength(cfg.count);
+  if (cfg.count && !px.numPixels()) cfg.count = 0;
+  ob.begin();
   px.begin();
+  ob.setBrightness(cfg.bright);
   px.setBrightness(cfg.bright);
   const uint32_t test[] = {px.Color(255, 0, 0), px.Color(0, 255, 0), px.Color(0, 0, 255), 0};
   for (uint32_t c : test) { led(c); delay(250); }

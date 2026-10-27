@@ -51,13 +51,14 @@ clears the signal for all.
 - **Virtual LEDs** (one column per type + approval) with live token counts and flash counts.
 - Tokens per flash per type (0 = off), brightness, dim glow while Claude runs (off by default), power-saving WiFi
   (for battery; off = faster), colour test (including an approval blink), status, WiFi network change.
-- **Attached LEDs and data pin.** Any number of LEDs from 1 to 65 535. The onboard LED is a single one on GPIO8; put an
-  external WS2812 strip on another pin (e.g. GPIO4), share GND, and power the strip from its own 5 V supply.
-  A strip draws up to ~60 mA per LED at full white, so lower the brightness. Drawing takes ~30 µs per LED, so
-  flashes get slower with thousands of LEDs.
-- **LED per type.** Each type and the approval signal can be given a LED number (1 = first, 0 = all LEDs).
+- **Onboard LED (GPIO8) and external strip are separate outputs.** The onboard LED can mirror everything (default),
+  show only status and approval, or be off. The external strip has its own data pin (default **GPIO4**; allowed: GPIO 0-7 and 10)
+  and any number of LEDs from 0 (none, default) to 65 535. Wire it with a shared GND and power it from its own 5 V supply;
+  a strip draws up to ~60 mA per LED at full white, so lower the brightness. Drawing takes ~30 µs per LED, so flashes get
+  slower with thousands of LEDs.
+- **LED per type (strip).** Each type and the approval signal can be given a LED number (1 = first, 0 = all LEDs).
   Empty = automatic: with 5 or more LEDs every type gets its own LED (approval: the 6th LED when there are 6+),
-  otherwise all LEDs flash together in the type's colour. Status dots and the glow use the first LED only.
+  otherwise all strip LEDs flash together in the type's colour. Status dots and the glow go to the onboard LED (or to the strip's first LED when the onboard LED is off).
 
 ## WiFi setup (AP mode)
 
