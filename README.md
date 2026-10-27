@@ -113,4 +113,9 @@ USB only: `W <ssid>\t<password>`, `?` → `IP <address>` / `NOWIFI`.
 - Flashes are fast (~50 ms per flash, faster with a backlog) and the backlog is capped at ~1 s, so the LED stays live.
   Switch off *Power-saving WiFi* on the Settings page for the lowest latency (needs mains/USB power).
 
+- **Approval reminder:** after N seconds of pending approval (default 45, 0 = off) the white blink gets twice as fast.
+- **Last 24 hours:** bar chart on the Live page (output + new input per hour) with the busiest hour; kept in flash.
+- **BOOT button (GPIO9):** short press = quiet mode (night brightness) until pressed again, long press (1.5 s) = reset the live counters.
+- **Backup:** System page → download the settings as JSON (`/config.json`, no WiFi or MQTT password) and restore them from a file.
+
 New protocol lines: `D 0` / `D 1` (turn finished / error), `U <5h%> <7d%>` (usage, -1 = unknown).

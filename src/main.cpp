@@ -27,6 +27,8 @@
 #include <Preferences.h>
 #include <Update.h>
 #include <time.h>
+#include <map>
+#include <functional>
 #include <PubSubClient.h>
 #include <Adafruit_NeoPixel.h>
 
@@ -45,6 +47,7 @@
 #define HIST_MAX    300     // history strip: LEDs used
 #define HIST_MS     150     // history strip: one step
 #define STATS_MS    300000  // daily totals are saved to flash this often (when changed)
+#define BTN_PIN     9       // BOOT button: short = quiet mode, long (1.5 s) = reset counters
 #define COL_OK      0x00FF00
 #define COL_ERR     0xFF0000
 
@@ -71,6 +74,9 @@ uint32_t useAt = 0;
 uint32_t hist[HIST_MAX], hcur = 0;       // history strip
 uint8_t appliedB = 0;
 volatile bool mqOk = false, mqReconf = false;
+uint32_t waitStart = 0;                  // when the current approval wait began
+bool quiet = false;                      // BOOT button: night brightness until pressed again
+uint32_t hours[24], hourId = 0;          // tokens (output + new input) per hour, [0] = this hour
 SemaphoreHandle_t cfgLock;               // settings strings are shared with the MQTT task
 
 enum { IDLE, ON, OFF } state = IDLE;
@@ -92,7 +98,7 @@ struct Cfg {
   bool glow, saver;
   bool doneSig, hist, night, mq;
   uint8_t meter, nFrom, nTo, nBright;   // meter: 0 off, 1 five-hour, 2 weekly; night hours 0-23
-  uint16_t mqPort;
+  uint16_t mqPort, remind;   // remind: seconds of pending approval until the blink speeds up (0 = off)
   String tz, mqHost, mqUser, mqPass, mqTopic;
   uint32_t col[6];   // colour per type (+ approval), 0xRRGGBB
   String list[6];    // strip LEDs per type (+ approval), as typed: "1,3,5-8", "all", empty = auto
@@ -148,6 +154,7 @@ void loadCfg() {
   cfg.nTo    = prefs.getUChar("nto", 7);
   cfg.nBright = prefs.getUChar("nbr", 5);
   cfg.tz     = prefs.getString("tz", "CET-1CEST,M3.5.0,M10.5.0/3");
+  cfg.remind = prefs.getUShort("remind", 45);
   cfg.mq     = prefs.getBool("mq", false);
   cfg.mqHost = prefs.getString("mqhost", "");
   cfg.mqPort = prefs.getUShort("mqport", 1883);
@@ -181,6 +188,7 @@ void saveCfg() {
   prefs.putUChar("nto", cfg.nTo);
   prefs.putUChar("nbr", cfg.nBright);
   prefs.putString("tz", cfg.tz);
+  prefs.putUShort("remind", cfg.remind);
   prefs.putBool("mq", cfg.mq);
   prefs.putString("mqhost", cfg.mqHost);
   prefs.putUShort("mqport", cfg.mqPort);
@@ -206,7 +214,7 @@ bool nightNow() {
                              : (tm.tm_hour >= cfg.nFrom || tm.tm_hour < cfg.nTo);
 }
 
-uint8_t curBright() { return nightNow() ? cfg.nBright : cfg.bright; }
+uint8_t curBright() { return quiet || nightNow() ? cfg.nBright : cfg.bright; }
 
 void applyBright() {
   uint8_t b = curBright();
@@ -246,6 +254,8 @@ void loadStats() {
   prefs.begin("stats", true);
   dayId = prefs.getUInt("day", 0);
   if (prefs.getBytesLength("days") == sizeof(days)) prefs.getBytes("days", days, sizeof(days));
+  hourId = prefs.getUInt("hour", 0);
+  if (prefs.getBytesLength("hours") == sizeof(hours)) prefs.getBytes("hours", hours, sizeof(hours));
   prefs.end();
 }
 
@@ -253,9 +263,26 @@ void saveStats() {
   prefs.begin("stats", false);
   prefs.putUInt("day", dayId);
   prefs.putBytes("days", days, sizeof(days));
+  prefs.putUInt("hour", hourId);
+  prefs.putBytes("hours", hours, sizeof(hours));
   prefs.end();
   statsDirty = false;
   statsAt = millis();
+}
+
+void rollHour() {
+  if (!timeOk()) return;
+  uint32_t id = time(nullptr) / 3600;
+  if (!hourId) { hourId = id; return; }
+  if (id == hourId) return;
+  uint32_t d = id > hourId ? id - hourId : 24;
+  if (d >= 24) memset(hours, 0, sizeof(hours));
+  else {
+    memmove(hours + d, hours, (24 - d) * sizeof(hours[0]));
+    memset(hours, 0, d * sizeof(hours[0]));
+  }
+  hourId = id;
+  statsDirty = true;
 }
 
 void rollDay() {
@@ -410,6 +437,7 @@ void addTokens(char type, long n) {
   total[i] += n;
   lastTok = millis();
   lastDone = 0;
+  if (i != 4) hours[0] += n;
   (i == 3 ? days[0].in : i == 4 ? days[0].cache : days[0].out) += n;
   statsDirty = true;
   uint16_t u = unitFor(type);
@@ -421,7 +449,7 @@ void addTokens(char type, long n) {
 
 void setWaiting(bool on) {
   if (!on) { waitUntil = 0; return; }
-  if (!waitUntil || (int32_t)(millis() - waitUntil) >= 0) approvals++;
+  if (!waitUntil || (int32_t)(millis() - waitUntil) >= 0) { approvals++; waitStart = millis(); }
   waitUntil = millis() + WAIT_MS;
 }
 
@@ -433,7 +461,8 @@ void play() {
     pending = 0;
     hcur = 0;
     state = IDLE;
-    if (now / 500 % 2 == 0) led(rgb(5), 5);
+    uint32_t per = cfg.remind && now - waitStart > cfg.remind * 1000UL ? 125 : 250;   // faster once it has waited a while
+    if (now / per % 2 == 0) led(rgb(5), 5);
     else led(0);
     return;
   }
@@ -482,6 +511,35 @@ void play() {
   if (--it.n == 0) { qHead = (qHead + 1) % QUEUE_LEN; qCount--; }
   pending--;
   state = ON; until = now + (pending > 15 ? 10 : 22);
+}
+
+// ---------- BOOT button ----------
+void resetCounters() {
+  memset(total, 0, sizeof(total));
+  memset(flashes, 0, sizeof(flashes));
+  memset(rem, 0, sizeof(rem));
+  approvals = doneOk = doneErr = 0;
+  lastDone = 0;
+}
+
+void buttonTick() {
+  static bool down = false, longDone = false;
+  static uint32_t at = 0;
+  bool p = digitalRead(BTN_PIN) == LOW;
+  uint32_t now = millis();
+  if (p && !down) { down = true; longDone = false; at = now; }
+  else if (p && down && !longDone && now - at > 1500) {
+    longDone = true;
+    resetCounters();
+    ob.setPixelColor(0, ob.Color(0, 0, 255)); ob.show(); delay(150); shown = 1;
+  } else if (!p && down) {
+    down = false;
+    if (!longDone && now - at > 30) {
+      quiet = !quiet;
+      applyBright();
+      ob.setPixelColor(0, quiet ? ob.Color(255, 160, 0) : ob.Color(0, 255, 0)); ob.show(); delay(150); shown = 1;
+    }
+  }
 }
 
 // ---------- Input ----------
@@ -719,6 +777,38 @@ void handleRoot() {
        "<tr><td>Usage, 5 hours</td><td id=u5>-</td></tr></table><div class=bar><i id=b5></i></div>"
        "<table><tr><td>Usage, 7 days</td><td id=u7>-</td></tr></table><div class=bar><i id=b7></i></div>";
 
+  s += "<h3>Last 24 hours</h3><div style='display:flex;align-items:flex-end;gap:2px;height:60px'>";
+  uint32_t mx = 1;
+  int peak = 0;
+  for (int i = 0; i < 24; i++) if (hours[i] > mx) { mx = hours[i]; peak = i; }
+  for (int i = 23; i >= 0; i--) {
+    String lab = String("-") + i + " h";
+    if (timeOk()) {
+      time_t t = time(nullptr) - i * 3600L;
+      struct tm tm;
+      localtime_r(&t, &tm);
+      char b[8];
+      strftime(b, sizeof(b), "%H:00", &tm);
+      lab = b;
+    }
+    s += "<div title='" + lab + "  " + kfmt(hours[i]) + "' style='flex:1;background:#6bf;min-height:1px;height:" +
+         String(hours[i] * 100UL / mx) + "%'></div>";
+  }
+  s += "</div><small>Output + new input per hour, newest on the right.";
+  if (hours[peak]) {
+    String lab = String("-") + peak + " h";
+    if (timeOk()) {
+      time_t t = time(nullptr) - peak * 3600L;
+      struct tm tm;
+      localtime_r(&t, &tm);
+      char b[8];
+      strftime(b, sizeof(b), "%H:00", &tm);
+      lab = b;
+    }
+    s += " Busiest hour: " + lab + " (" + kfmt(hours[peak]) + ").";
+  }
+  s += "</small>";
+
   s += "<h3>Last 7 days</h3><table><tr><th>Day<th>Output<th>New input<th>Cache</tr>";
   Day sum = {0, 0, 0};
   time_t now = time(nullptr);
@@ -747,6 +837,7 @@ void handleRoot() {
   }
   s += "<tr><td>Uptime</td><td>" + String(millis() / 60000) + " min</td></tr>";
   s += "<tr><td>Last message from the PC</td><td>" + (lastMsg ? String(ago) + " s ago" : String("none yet")) + "</td></tr>";
+  if (quiet) s += "<tr><td>Quiet mode (BOOT button)</td><td>on</td></tr>";
   s += "<tr><td>Queued flashes</td><td>" + String(pending) + "</td></tr>";
   s += "<tr><td>Turns finished / with error</td><td id=dn>" + String(doneOk) + " / " + String(doneErr) + "</td></tr>";
   s += "</table><small>Token and flash counts since power-on; the last column counts approval requests.</small>";
@@ -779,6 +870,7 @@ void handleSettings() {
   s += checkField("glow", "Dim glow while Claude is running", cfg.glow);
   s += checkField("saver", "Power-saving WiFi (for battery; off = faster)", cfg.saver);
   s += checkField("done", "Signal when Claude finishes (green) or fails (red)", cfg.doneSig);
+  s += numField("remind", "Approval blink gets faster after (s, 0 = off)", cfg.remind, 0, 3600);
 
   s += "<h3>LEDs</h3>";
   s += selField("onb", "Onboard LED (GPIO8)", cfg.onb, {"mirror everything", "status + approval only", "off"});
@@ -829,6 +921,11 @@ void handleSystem() {
   s += "<h3>Firmware update</h3><form method=post action=/update enctype=multipart/form-data>"
        "<input type=file name=fw accept=.bin required style=width:100%><br><button>Upload and restart</button></form>"
        "<small>Pick <b>.pio/build/supermini/firmware.bin</b>. The page has no password: anyone on your network can open it.</small>";
+  s += "<h3>Backup</h3><a href=/config.json>Download settings</a> <small>(WiFi and MQTT password are not included)</small>"
+       "<br><input type=file id=imp accept=.json style=width:100%><small>Pick a settings file to restore it.</small>"
+       "<script>$=i=>document.getElementById(i);$('imp').onchange=e=>{const f=e.target.files[0];if(!f)return;"
+       "f.text().then(t=>fetch('/import',{method:'POST',body:t,headers:{'Content-Type':'text/plain'}}))"
+       ".then(r=>r.text()).then(m=>{alert(m);location.href='/settings';});};</script>";
   s += "<h3>Device</h3><table><tr><td>Free memory</td><td>" + String(ESP.getFreeHeap() / 1024) + " kB</td></tr>"
        "<tr><td>Clock</td><td>" + (timeOk() ? "set" : "not set") + "</td></tr>"
        "<tr><td>MQTT</td><td>" + (!cfg.mq ? "off" : mqOk ? "connected" : "not connected") + "</td></tr></table>";
@@ -854,49 +951,54 @@ void redirectTo(const char* where) {
   http.send(303);
 }
 
-void handleSave() {
+typedef std::function<String(const String&)> ArgFn;
+typedef std::function<bool(const String&)> HasFn;
+
+// Applies a full set of settings (from the form or from an imported file) and saves them.
+void applySettings(const ArgFn& arg, const HasFn& has) {
   xSemaphoreTake(cfgLock, portMAX_DELAY);
-  cfg.out    = constrain(http.arg("out").toInt(), 0, 60000);
-  cfg.in     = constrain(http.arg("in").toInt(), 0, 60000);
-  cfg.cache  = constrain(http.arg("cache").toInt(), 0, 60000);
-  cfg.bright = constrain(http.arg("bright").toInt(), 1, 255);
-  cfg.glow   = http.hasArg("glow");
-  cfg.saver  = http.hasArg("saver");
-  cfg.doneSig = http.hasArg("done");
+  cfg.out    = constrain(arg("out").toInt(), 0, 60000);
+  cfg.in     = constrain(arg("in").toInt(), 0, 60000);
+  cfg.cache  = constrain(arg("cache").toInt(), 0, 60000);
+  cfg.bright = constrain(arg("bright").toInt(), 1, 255);
+  cfg.glow   = has("glow");
+  cfg.saver  = has("saver");
+  cfg.doneSig = has("done");
   for (int i = 0; i < 6; i++) {
-    String a = http.arg(String("g") + i);
+    String a = arg(String("g") + i);
     a.trim();
     cfg.list[i] = a.substring(0, 60);
     parseSel(cfg.list[i], sel[i]);
-    String c = http.arg(String("c") + i);   // "#rrggbb"
+    String c = arg(String("c") + i);   // "#rrggbb"
     if (c.length() == 7 && c[0] == '#') cfg.col[i] = strtoul(c.c_str() + 1, nullptr, 16) & 0xFFFFFF;
   }
-  uint16_t count = constrain(http.arg("count").toInt(), 0, 65535);
-  cfg.onb = constrain(http.arg("onb").toInt(), 0, 2);
-  int pin = http.arg("pin").toInt();
+  uint16_t count = constrain(arg("count").toInt(), 0, 65535);
+  cfg.onb = constrain(arg("onb").toInt(), 0, 2);
+  int pin = arg("pin").toInt();
   bool hw = count != cfg.count || (pinOk(pin) && pin != cfg.pin);
   cfg.count = count;
   if (pinOk(pin)) cfg.pin = pin;
 
-  cfg.hist  = http.hasArg("hist");
-  cfg.meter = constrain(http.arg("meter").toInt(), 0, 2);
+  cfg.hist  = has("hist");
+  cfg.meter = constrain(arg("meter").toInt(), 0, 2);
   memset(hist, 0, sizeof(hist));
   hcur = 0;
-  cfg.night = http.hasArg("night");
-  cfg.nFrom = constrain(http.arg("nfrom").toInt(), 0, 23);
-  cfg.nTo   = constrain(http.arg("nto").toInt(), 0, 23);
-  cfg.nBright = constrain(http.arg("nbr").toInt(), 0, 255);
-  String tz = http.arg("tz");
+  cfg.night = has("night");
+  cfg.nFrom = constrain(arg("nfrom").toInt(), 0, 23);
+  cfg.nTo   = constrain(arg("nto").toInt(), 0, 23);
+  cfg.nBright = constrain(arg("nbr").toInt(), 0, 255);
+  String tz = arg("tz");
   tz.trim();
   if (tz.length() && tz != cfg.tz) { cfg.tz = tz.substring(0, 60); startNtp(); }
 
-  cfg.mq = http.hasArg("mq");
-  cfg.mqHost = http.arg("mqhost").substring(0, 60);
+  cfg.remind = constrain(arg("remind").toInt(), 0, 3600);
+  cfg.mq = has("mq");
+  cfg.mqHost = arg("mqhost").substring(0, 60);
   cfg.mqHost.trim();
-  cfg.mqPort = constrain(http.arg("mqport").toInt(), 1, 65535);
-  cfg.mqUser = http.arg("mquser").substring(0, 40);
-  if (http.arg("mqpass").length()) cfg.mqPass = http.arg("mqpass").substring(0, 60);
-  String topic = http.arg("mqtopic");
+  cfg.mqPort = constrain(arg("mqport").toInt(), 1, 65535);
+  cfg.mqUser = arg("mquser").substring(0, 40);
+  if (arg("mqpass").length()) cfg.mqPass = arg("mqpass").substring(0, 60);
+  String topic = arg("mqtopic");
   topic.trim();
   cfg.mqTopic = topic.length() ? topic.substring(0, 40) : "tokenled";
   mqReconf = true;
@@ -904,12 +1006,83 @@ void handleSave() {
   xSemaphoreGive(cfgLock);
   if (hw) applyHw();
   applyCfg();
+}
+
+void handleSave() {
+  applySettings([](const String& k) { return http.arg(k); }, [](const String& k) { return http.hasArg(k); });
   redirectTo("/settings?saved");
+}
+
+// ---------- Settings backup (flat JSON, same keys as the form) ----------
+String jq(String v) {
+  v.replace("\"", "");
+  v.replace("\\", "");
+  return "\"" + v + "\"";
+}
+
+String exportJson() {
+  String s = "{\n";
+  auto num = [&](const char* k, long v) { s += String("\"") + k + "\":" + v + ",\n"; };
+  auto flag = [&](const char* k, bool v) { s += String("\"") + k + "\":" + (v ? "true" : "false") + ",\n"; };
+  auto txt = [&](const String& k, const String& v) { s += "\"" + k + "\":" + jq(v) + ",\n"; };
+  num("out", cfg.out); num("in", cfg.in); num("cache", cfg.cache); num("bright", cfg.bright);
+  flag("glow", cfg.glow); flag("saver", cfg.saver); flag("done", cfg.doneSig); num("remind", cfg.remind);
+  num("onb", cfg.onb); num("count", cfg.count); num("pin", cfg.pin);
+  flag("hist", cfg.hist); num("meter", cfg.meter);
+  flag("night", cfg.night); num("nfrom", cfg.nFrom); num("nto", cfg.nTo); num("nbr", cfg.nBright); txt("tz", cfg.tz);
+  flag("mq", cfg.mq); txt("mqhost", cfg.mqHost); num("mqport", cfg.mqPort); txt("mquser", cfg.mqUser); txt("mqtopic", cfg.mqTopic);
+  for (int i = 0; i < 6; i++) { txt(String("c") + i, hex(i)); txt(String("g") + i, cfg.list[i]); }
+  s.remove(s.length() - 2, 1);   // last comma
+  return s + "}\n";
+}
+
+std::map<String, String> parseJson(const String& j) {
+  std::map<String, String> m;
+  int i = 0, n = j.length();
+  while (true) {
+    int k = j.indexOf('"', i);
+    if (k < 0) break;
+    int ke = j.indexOf('"', k + 1);
+    int c = ke < 0 ? -1 : j.indexOf(':', ke);
+    if (c < 0) break;
+    String key = j.substring(k + 1, ke), v;
+    i = c + 1;
+    while (i < n && j[i] == ' ') i++;
+    if (i < n && j[i] == '"') {
+      int e = j.indexOf('"', i + 1);
+      if (e < 0) break;
+      v = j.substring(i + 1, e);
+      i = e + 1;
+    } else {
+      int e = i;
+      while (e < n && j[e] != ',' && j[e] != '}' && j[e] != '\n') e++;
+      v = j.substring(i, e);
+      v.trim();
+      i = e;
+    }
+    m[key] = v;
+  }
+  return m;
+}
+
+void handleExport() {
+  http.sendHeader("Content-Disposition", "attachment; filename=tokenled-settings.json");
+  http.send(200, "application/json", exportJson());
+}
+
+void handleImport() {
+  auto in = parseJson(http.arg("plain"));
+  if (!in.count("out") || !in.count("bright")) { http.send(400, "text/plain", "This is not a Token LED settings file."); return; }
+  auto m = parseJson(exportJson());   // missing keys keep their current value
+  for (auto& kv : in) m[kv.first] = kv.second;
+  applySettings([&](const String& k) { auto it = m.find(k); return it == m.end() ? String() : it->second; },
+                [&](const String& k) { auto it = m.find(k); return it != m.end() && it->second == "true"; });
+  http.send(200, "text/plain", "Settings restored.");
 }
 
 void handleBlink() {   // click on a virtual LED: 'a' = approval blink for 3 s, otherwise 3 flashes of that type
   String t = http.arg("t");
-  if (t == "a") { waitUntil = millis() + 3000; approvals++; }
+  if (t == "a") { waitUntil = millis() + 3000; waitStart = millis(); approvals++; }
   else if (t.length() == 1 && strchr(TYPES, t[0])) enqueue(t[0], 3);
   http.send(204);
 }
@@ -1033,6 +1206,7 @@ void setup() {
   setCpuFrequencyMhz(80);     // on battery: less power, enough for WiFi
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);   // never block on output when no USB host is attached
+  pinMode(BTN_PIN, INPUT_PULLUP);
   cfgLock = xSemaphoreCreateMutex();
   loadCfg();
   loadStats();
@@ -1067,6 +1241,8 @@ void setup() {
   http.on("/save", HTTP_POST, handleSave);
   http.on("/test", HTTP_POST, handleTest);
   http.on("/b", handleBlink);
+  http.on("/config.json", handleExport);
+  http.on("/import", HTTP_POST, handleImport);
   http.on("/wifi", HTTP_POST, handleWifi);
   http.on("/update", HTTP_POST, handleUpdateDone, handleUpload);
   http.onNotFound(handleNotFound);
@@ -1079,12 +1255,14 @@ void setup() {
 void loop() {
   readSerial();
   network();
+  buttonTick();
   histTick();
   play();
   static uint32_t slow = 0;
   if (millis() - slow > 1000) {
     slow = millis();
     rollDay();
+    rollHour();
     applyBright();
     if (statsDirty && millis() - statsAt > STATS_MS) saveStats();
   }
