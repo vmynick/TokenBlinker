@@ -41,6 +41,7 @@
 #define STRIP_PIN   4        // default data pin of the external strip; pin and LED count are set on the web page
 #define UDP_PORT    4210
 #define HOSTNAME    "tokenled"   // http://tokenled.local
+#define FW_VERSION  "1.0.0"      // shown on the System page; matches the GitHub release
 #define QUEUE_LEN   32
 #define MAX_PENDING 50      // more queued flashes than this are dropped so the LED never lags by more than about a second
 #define ALIVE_MS    5000    // how long the last message counts as "Claude is running"
@@ -1173,7 +1174,8 @@ void handleSystem() {
        "<script>$=i=>document.getElementById(i);$('imp').onchange=e=>{const f=e.target.files[0];if(!f)return;"
        "f.text().then(t=>fetch('/import',{method:'POST',body:t,headers:{'Content-Type':'text/plain'}}))"
        ".then(r=>r.text()).then(m=>{alert(m);location.href='/settings';});};</script>";
-  s += "</details><details class=sec><summary>Device</summary><table><tr><td>Free memory</td><td>" + String(ESP.getFreeHeap() / 1024) + " kB</td></tr>"
+  s += "</details><details class=sec><summary>Device</summary><table><tr><td>Firmware</td><td>" FW_VERSION "</td></tr>"
+       "<tr><td>Free memory</td><td>" + String(ESP.getFreeHeap() / 1024) + " kB</td></tr>"
        "<tr><td>Clock</td><td>" + (timeOk() ? "set" : "not set") + "</td></tr>"
        "<tr><td>MQTT</td><td>" + (!cfg.mq ? "off" : mqOk ? "connected" : "not connected") + "</td></tr></table>";
   s += "</details>" + secJs("open2");

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token LED installer</title>
+<meta name="description" content="Install the Token LED firmware on an ESP32-C3 from your browser: a desk LED that flashes with Claude Code's live token stream.">
+<script type="module" src="https://unpkg.com/esp-web-tools@10.4.0/dist/web/install-button.js?module"></script>
+<style>
+  :root { --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --card: #f6f8fa; --line: #d1d9e0; --accent: #0969da; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1; --card: #151b23; --line: #3d444d; --accent: #4493f8; }
+  }
+  :root[data-theme="dark"] { --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1; --card: #151b23; --line: #3d444d; --accent: #4493f8; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 680px; margin: 0 auto; padding: 32px 16px 48px; }
+  h1 { margin: 0 0 4px; font-size: 28px; }
+  .sub { margin: 0 0 20px; color: var(--muted); }
+  img.demo { width: 100%; max-width: 480px; display: block; margin: 0 auto 24px; border-radius: 10px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; margin: 0 0 18px; }
+  .card h2 { margin: 0 0 10px; font-size: 18px; }
+  ol { margin: 0; padding-left: 22px; }
+  li { margin: 4px 0; }
+  code { background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; font-size: 14px; word-break: break-all; }
+  a { color: var(--accent); }
+  .install { text-align: center; margin: 8px 0 4px; }
+  esp-web-install-button button[slot="activate"] { font: inherit; font-weight: 600; color: #fff; background: #1f883d; border: 0; border-radius: 8px; padding: 12px 22px; cursor: pointer; }
+  .note { color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Token LED</h1>
+  <p class="sub">A desk LED that flashes live with the tokens Claude Code generates, and blinks when Claude waits for your approval.</p>
+  <img class="demo" src="https://raw.githubusercontent.com/vmynick/TokenBlinker/master/media/TokenBlinker.gif" alt="The printed box on a desk: a purple thinking flash, a blue flash, then the green finished signal">
+
+  <div class="card">
+    <h2>1. Install the firmware</h2>
+    <p>Plug the ESP32-C3 SuperMini (Plus) into this computer with a USB-C data cable, click the button and pick its serial port.</p>
+    <div class="install">
+      <esp-web-install-button manifest="manifest.json">
+        <button slot="activate">Install Token LED 1.0.0</button>
+        <span slot="unsupported">Your browser cannot talk to USB devices. Use Chrome or Edge on a desktop computer.</span>
+        <span slot="not-allowed">The page must be opened over https.</span>
+      </esp-web-install-button>
+    </div>
+    <p class="note">If the port does not show up: hold the BOOT button while plugging the board in, then try again.
+      A new install erases the board (WiFi and settings start fresh).</p>
+  </div>
+
+  <div class="card">
+    <h2>2. Connect it to your WiFi</h2>
+    <ol>
+      <li>After the install the LED starts its own open network <code>TokenLED-xxxx</code>.</li>
+      <li>Join it with your phone; the setup page opens by itself (otherwise go to <code>http://192.168.4.1</code>).</li>
+      <li>Pick your 2.4 GHz network and enter the password. The LED is then at <code>http://tokenled.local</code>.</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h2>3. Let Claude Code talk to it</h2>
+    <ol>
+      <li>Download the launcher: <a href="https://github.com/vmynick/TokenBlinker/releases/latest">token_tap.exe</a> (Windows)
+        or <a href="https://github.com/vmynick/TokenBlinker/blob/master/token_tap.py">token_tap.py</a> (macOS, Linux: <code>chmod +x token_tap.py</code>).</li>
+      <li>In VS Code's user <code>settings.json</code> add
+        <code>"claudeCode.claudeProcessWrapper": "C:\\path\\to\\token_tap.exe"</code> (or the path of <code>token_tap.py</code>).</li>
+      <li>Start a new Claude session. Claude works exactly the same when the LED is off: delete the line to switch it off.</li>
+    </ol>
+  </div>
+
+  <p class="note">Source, 3D-printable case and all the details: <a href="https://github.com/vmynick/TokenBlinker">github.com/vmynick/TokenBlinker</a>. MIT licence.</p>
+</main>
+</body>
+</html>

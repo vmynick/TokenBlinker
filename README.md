@@ -1,4 +1,4 @@
-# Claude token LED
+# Token LED for Claude Code
 
 A desk LED (ESP32-C3 SuperMini Plus) that flashes live with the tokens Claude Code generates, and
 signals when Claude waits for your approval. WiFi, battery-capable, no proxy.
@@ -7,11 +7,36 @@ It never calls the model and spends no tokens: it only watches output that is al
 
 ![The printed box on a desk: a purple thinking flash, a blue flash, then the green "finished" signal across the strip](media/TokenBlinker.gif)
 
+## Quick start
+
+**You need:** an ESP32-C3 SuperMini Plus (RGB LED on board; the plain SuperMini with a blue LED works too, choose
+*plain LED* on the Settings page) and a USB-C data cable. Optional: a 7-LED WS2812B strip (50 x 9.84 mm) for the
+case, a buzzer, and for the case PLA in any colour plus white and black, 4 x M2 brass heat-set inserts, 4 x M2 x 5
+screws and 4 adhesive rubber feet (10 mm).
+
+1. **Firmware:** open the [web installer](https://vmynick.github.io/TokenBlinker/) in Chrome or Edge, plug the board in
+   and click *Install*. (Or build it yourself: `pio run -t upload`.)
+2. **WiFi:** join the `TokenLED-xxxx` network with your phone and pick your 2.4 GHz network. The LED is then at
+   http://tokenled.local.
+3. **Launcher:** Windows: `token_tap.exe` from the [latest release](https://github.com/vmynick/TokenBlinker/releases/latest)
+   (unsigned, so Windows may warn; or build it from `token_tap.cs`, see Usage). macOS and Linux: `token_tap.py`
+   (Python 3.8+, `chmod +x token_tap.py`).
+4. **VS Code:** add this line to the user `settings.json`, with the path of your launcher, then start a new Claude session:
+   ```json
+   "claudeCode.claudeProcessWrapper": "C:\\Tools\\token_tap.exe"
+   ```
+   (macOS / Linux: `"/home/you/TokenBlinker/token_tap.py"`). Delete the line to switch it off; Claude works the same either way.
+5. **Strip (optional):** strip DIN to GPIO4, 5V and GND to the board; set the LED count on the Settings page.
+6. **Case (optional):** print the three plates in `enclosure/TokenLED_Box/` (see [Enclosure](#enclosure-3d-print-fusion-360)).
+
 ## Files
 
 | File | What it is |
 |---|---|
 | `token_tap.cs` → `token_tap.exe` | **Live flashing:** launcher for the VS Code Claude extension. Passes the `claude.exe` output through unchanged and sends the token stream and approval waits to the LED. |
+| `token_tap.py` | The same launcher for macOS and Linux (standard library only). |
+| `docs/` | The web installer (GitHub Pages, ESP Web Tools) with the full firmware image. |
+| `enclosure/` | 3D-printable case: Fusion 360 design and script, STL and print-ready 3MF plates. |
 | `src/main.cpp` + `platformio.ini` | Firmware: onboard LED on GPIO8 (WS2812B or a plain LED), external strip, optional buzzer, WiFi + USB + web page. |
 | `token_blinker.py` | WiFi setup over USB, colour test, and log-based counting for terminal Claude Code sessions. |
 | `token_led.ino`, `token_led_test.py`, `token_proxy.py`, `claude-token-led.user.js` | Old proxy-based experiments (Hungarian comments), kept for reference. |
@@ -27,8 +52,8 @@ VS Code Claude extension ──> token_tap.exe ──> claude.exe ──HTTPS─
 
 There is no proxy and no background program, and the API traffic is untouched. If the LED is off or
 there is no network, Claude works exactly the same, it just does not flash. The extension starts
-`token_tap.exe` through the `claudeCode.claudeProcessWrapper` setting (VS Code user `settings.json`);
-to switch it off, delete that line and start a new Claude session.
+`token_tap.exe` (macOS / Linux: `token_tap.py`) through the `claudeCode.claudeProcessWrapper` setting
+(VS Code user `settings.json`); to switch it off, delete that line and start a new Claude session.
 
 Text, thinking and tool-input tokens are estimated while generating (4 characters ≈ 1 token); at the end of
 each message the real `output_tokens` tops up the difference. Thinking usually arrives redacted (no text, only
@@ -161,7 +186,7 @@ It creates the bodies *Base*, *Lid*, *Diffuser* and *Baffle* (plus *Strip (refer
 computer). The STL and 3MF files come from this design; the script still builds the version without the edits:
 - Diffuser: the light window is recessed 1.2 mm from the front with rounded edges, so it is only 0.4 mm thick in front of the
   LEDs (brighter, less diffusion).
-- Baffle: the bar below each cell fills the space under the LED up to its lower edge; the walls are cut back at the strip's upper
+- Baffle: the bar below each cell fills the space under the LED up to 0.3 mm below its lower edge; the walls are cut back at the strip's upper
   edge; the left end wall reaches back like the inner walls, the right one stops short for the wires.
 - Base: rounded inner corners at the front.
 
@@ -181,7 +206,7 @@ computer). The STL and 3MF files come from this design; the script still builds 
 - 4 round recesses (10 mm, 1 mm deep) in the bottom for adhesive rubber feet.
 - Assembly: board, strip (wires into the slot), baffle, diffuser, lid. The baffle's lower bar reaches under the LEDs, so it
   cannot be lowered straight in front of the stuck strip: lower it about 1.2 mm further forward (into the empty diffuser slot),
-  then push it back so the bar slides under the LEDs.
+  then push it back so the bar slides under the LEDs (0.3 mm of room).
 - Printing (Bambu Lab P2S, PLA Basic, 0.2 mm Standard, 3 walls, 15 % infill, no supports): the base stands on its bottom,
   the lid lies on its top face, the diffuser on its back plate, the baffle on its front face.
 - The LEDs are measured (4.97 x 4.96 mm, 2.08 mm gaps, strip 9.84 mm wide). Still assumed: board 23 x 18 mm; strip 50 mm
