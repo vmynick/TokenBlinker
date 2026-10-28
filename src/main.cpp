@@ -698,7 +698,8 @@ void handleLine(char* s, bool usb) {
     if (useLevel(n) > useLevel(use5)) logEv(EV_U5, n);
     if (useLevel(m) > useLevel(use7)) logEv(EV_U7, m);
     use5 = n; use7 = m; useAt = millis();
-    reset5 = r5; reset7 = r7;
+    if (r5) reset5 = r5;   // a line without reset times (older launcher still running) keeps the last known ones
+    if (r7) reset7 = r7;
     shown = 1;
   }
   else if (usb && s[0] == 'W' && s[1] == ' ') {
