@@ -148,6 +148,14 @@ It creates the bodies *Base*, *Lid*, *Diffuser* and *Baffle* (plus *Strip (refer
 `python enclosure/plate_p2s.py` turns them into print orientation (`*_P2S.stl`) and one plate file per filament colour:
 `TokenLED_Box_P2S.3mf` (base + lid), `TokenLED_Diffuser_P2S.3mf` (white) and `TokenLED_Baffle_P2S.3mf` (black).
 
+`TokenLED_Box.f3d` is the Fusion design with hand edits on top of the script's output (Fusion 360 > File > Open > Open from my
+computer). The STL and 3MF files come from this design; the script still builds the version without the edits:
+- Diffuser: the light window is recessed 1.2 mm from the front with rounded edges, so it is only 0.4 mm thick in front of the
+  LEDs (brighter, less diffusion).
+- Baffle: the bar below each cell fills the space under the LED up to its lower edge; the walls are cut back at the strip's upper
+  edge; the left end wall reaches back like the inner walls, the right one stops short for the wires.
+- Base: rounded inner corners at the front.
+
 - Wedge with a trapezoid footprint: 74 mm wide at the front (68.8 mm across the rounded front corners), 36 at the back,
   52 deep; 22 mm high at the front, 13 at the back.
 - Front: the 7-LED strip (50 x 9.84 mm) stands on its edge in a bay behind the front, its back stuck to the bay's back wall,
@@ -162,7 +170,9 @@ It creates the bodies *Base*, *Lid*, *Diffuser* and *Baffle* (plus *Strip (refer
 - Lid: sloped plate, 4 x **M2 x 5** screws into **M2 brass heat-set inserts** (3.2 mm holes, 4 mm deep; press them in with a
   soldering iron). The screw posts are joined to the corners.
 - 4 round recesses (10 mm, 1 mm deep) in the bottom for adhesive rubber feet.
-- Assembly: board, strip (wires into the slot), baffle, diffuser, lid.
+- Assembly: board, strip (wires into the slot), baffle, diffuser, lid. The baffle's lower bar reaches under the LEDs, so it
+  cannot be lowered straight in front of the stuck strip: lower it about 1.2 mm further forward (into the empty diffuser slot),
+  then push it back so the bar slides under the LEDs.
 - Printing (Bambu Lab P2S, PLA Basic, 0.2 mm Standard, 3 walls, 15 % infill, no supports): the base stands on its bottom,
   the lid lies on its top face, the diffuser on its back plate, the baffle on its front face.
 - The LEDs are measured (4.97 x 4.96 mm, 2.08 mm gaps, strip 9.84 mm wide). Still assumed: board 23 x 18 mm; strip 50 mm
