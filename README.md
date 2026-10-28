@@ -7,8 +7,6 @@ It never calls the model and spends no tokens: it only watches output that is al
 
 ![The printed box on a desk: a purple thinking flash, a blue flash, then the green "finished" signal across the strip](media/TokenBlinker.gif)
 
-[Video (MP4)](media/TokenBlinker.mp4)
-
 ## Files
 
 | File | What it is |
