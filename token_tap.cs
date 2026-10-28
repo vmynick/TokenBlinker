@@ -9,7 +9,7 @@
 // Build (the .NET Framework is on every Windows):
 //   C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /optimize /r:System.Web.Extensions.dll token_tap.cs
 // LED address: TOKENLED_HOST environment variable, default tokenled.local
-// (UDP 4210, "T <type> <tokens>", "A 1", "D <0|1>", "U <5h%> <7d%>")
+// (UDP 4210, "T <type> <tokens>", "A 1", "D <0|1>", "U <5h%> <7d%> <5h reset> <7d reset>")
 
 using System;
 using System.Collections.Generic;
@@ -169,6 +169,7 @@ static class TokenTap
     static volatile bool waiting;   // Claude waits for the user's approval
     static volatile int doneReq = -1;           // turn finished: 0 ok, 1 error, -1 nothing to send
     static volatile int use5 = -1, use7 = -1;   // usage limits in percent
+    static volatile int reset5, reset7;         // when those windows reset (Unix time, 0 = unknown)
 
     static void Feed(byte[] b, int n)
     {
@@ -227,7 +228,7 @@ static class TokenTap
             return;
         }
 
-        // Usage limits: rate_limit_event carries the utilisation (0..1) of the 5-hour and 7-day windows.
+        // Usage limits: rate_limit_event carries the utilisation (0..1) and reset time of the 5-hour and 7-day windows.
         if (complete && head.IndexOf("\"rate_limit_event\"", StringComparison.Ordinal) >= 0)
         {
             object w = Get(Get(Get(json.DeserializeObject(s), "rate_limit_info"), "unifiedWindows"), "five_hour");
@@ -235,6 +236,8 @@ static class TokenTap
             object u5 = Get(w, "utilization"), u7 = Get(w7, "utilization");
             if (u5 != null) use5 = (int)Math.Round(Convert.ToDouble(u5) * 100);
             if (u7 != null) use7 = (int)Math.Round(Convert.ToDouble(u7) * 100);
+            if (Get(w, "resetsAt") != null) reset5 = (int)Num(w, "resetsAt");
+            if (Get(w7, "resetsAt") != null) reset7 = (int)Num(w7, "resetsAt");
             EnsureSender();
             return;
         }
@@ -341,7 +344,7 @@ static class TokenTap
         IPEndPoint ep = null;
         DateTime nextResolve = DateTime.MinValue, nextPing = DateTime.MinValue, nextWait = DateTime.MinValue, nextUse = DateTime.MinValue;
         bool sentWaiting = false;
-        int sent5 = -2, sent7 = -2;
+        int sent5 = -2, sent7 = -2, sentR5 = 0, sentR7 = 0;
         while (true)
         {
             DateTime now = DateTime.UtcNow;
@@ -370,11 +373,11 @@ static class TokenTap
                 sentWaiting = w;
                 int d = doneReq;
                 if (d >= 0) { doneReq = -1; sb.Append("D ").Append(d).Append('\n'); }
-                int a = use5, b = use7;
-                if ((a != sent5 || b != sent7 || now >= nextUse) && (a >= 0 || b >= 0))
+                int a = use5, b = use7, r5 = reset5, r7 = reset7;
+                if ((a != sent5 || b != sent7 || r5 != sentR5 || r7 != sentR7 || now >= nextUse) && (a >= 0 || b >= 0))
                 {
-                    sb.Append("U ").Append(a).Append(' ').Append(b).Append('\n');   // repeated: the LED forgets old values
-                    sent5 = a; sent7 = b; nextUse = now.AddSeconds(60);
+                    sb.Append("U ").Append(a).Append(' ').Append(b).Append(' ').Append(r5).Append(' ').Append(r7).Append('\n');   // repeated: the LED forgets old values
+                    sent5 = a; sent7 = b; sentR5 = r5; sentR7 = r7; nextUse = now.AddSeconds(60);
                 }
                 if (sb.Length > 0)
                 {

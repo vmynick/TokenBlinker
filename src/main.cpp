@@ -8,7 +8,8 @@
 //   "B <type> <count>"    flash <count> times directly (test)
 //   "A 1" / "A 0"         Claude waits for / got the user's approval (repeat "A 1" every ~1 s)
 //   "D 0" / "D 1"        Claude finished a turn / finished with an error (green / red signal)
-//   "U <5h%> <7d%>"       usage limits in percent (-1 = unknown), shown as a bar on the strip
+//   "U <5h%> <7d%> [<5h reset> <7d reset>]"  usage limits in percent (-1 = unknown), shown as a bar on the strip;
+//                         optional reset times (Unix time, 0 = unknown), shown on the Live page
 //   "P"                   keep-alive (shown on the web page; dim glow if enabled)
 //   "W <ssid>\t<pass>"    set WiFi (USB only), saved to flash; reply: "IP <address>"
 //   "?"                   status (USB only): "IP <address>" or "NOWIFI"
@@ -74,6 +75,7 @@ uint32_t sigUntil = 0, doneOk = 0, doneErr = 0;
 bool sigPending = false, sigErr = false;
 uint8_t lastDone = 0;                    // 0 none since the last tokens, 1 finished, 2 error
 int use5 = -1, use7 = -1;                // usage limits in percent
+uint32_t reset5 = 0, reset7 = 0;         // when those windows reset (Unix time, 0 = unknown)
 uint32_t useAt = 0;
 uint32_t hist[HIST_MAX], hcur = 0;       // history strip
 uint8_t appliedB = 0;
@@ -681,7 +683,7 @@ void storeWifi(const String& ssid, const String& pass);
 
 void handleLine(char* s, bool usb) {
   lastMsg = millis();
-  char type; long n, m;
+  char type; long n, m, r5 = 0, r7 = 0;
   if (sscanf(s, "T %c %ld", &type, &n) == 2) addTokens(type, n);
   else if (sscanf(s, "B %c %ld", &type, &n) == 2) enqueue(type, n);
   else if (sscanf(s, "A %ld", &n) == 1) setWaiting(n != 0);
@@ -692,10 +694,11 @@ void handleLine(char* s, bool usb) {
     (n ? doneErr : doneOk)++;
     if (cfg.doneSig) { sigErr = n != 0; sigPending = true; sigUntil = 0; }
   }
-  else if (sscanf(s, "U %ld %ld", &n, &m) == 2) {
+  else if (sscanf(s, "U %ld %ld %ld %ld", &n, &m, &r5, &r7) >= 2) {   // reset times are optional (older launchers)
     if (useLevel(n) > useLevel(use5)) logEv(EV_U5, n);
     if (useLevel(m) > useLevel(use7)) logEv(EV_U7, m);
     use5 = n; use7 = m; useAt = millis();
+    reset5 = r5; reset7 = r7;
     shown = 1;
   }
   else if (usb && s[0] == 'W' && s[1] == ' ') {
@@ -964,8 +967,8 @@ void handleRoot() {
   s += "</div><small>Click a LED to test it.</small>";
 
   s += "<table><tr><td>State</td><td id=st>" + String(stateName()) + "</td></tr>"
-       "<tr><td>Usage, 5 hours</td><td id=u5>-</td></tr></table><div class=bar><i id=b5></i></div>"
-       "<table><tr><td>Usage, 7 days</td><td id=u7>-</td></tr></table><div class=bar><i id=b7></i></div>";
+       "<tr><td>Usage, 5 hours</td><td id=u5>-</td></tr></table><div class=bar><i id=b5></i></div><small id=r5></small>"
+       "<table><tr><td>Usage, 7 days</td><td id=u7>-</td></tr></table><div class=bar><i id=b7></i></div><small id=r7></small>";
 
   s += "<h3>Last 24 hours</h3><div style='display:flex;align-items:flex-end;gap:2px;height:60px'>";
   uint32_t mx = 1;
@@ -1055,13 +1058,19 @@ void handleRoot() {
 
   s += F("<script>const n=[],f=[],l=[],lit=[],$=i=>document.getElementById(i);let wait=0,last=null;"
          "for(let i=0;i<6;i++){n[i]=$('n'+i);f[i]=$('f'+i);l[i]=$('l'+i);lit[i]=0;}"
-         "function use(k,v){$('u'+k).textContent=v<0?'-':v+' %';const b=$('b'+k).style;b.width=Math.max(v,0)+'%';"
-         "b.background=v>=85?'#c44':v>=60?'#cb4':'#4a4';}"
+         "function use(k,v,r){$('u'+k).textContent=v<0?'-':v+' %';const b=$('b'+k).style;b.width=Math.max(v,0)+'%';"
+         "b.background=v>=85?'#c44':v>=60?'#cb4':'#4a4';$('r'+k).textContent=r?when(r):'';}"
+         // reset time in the browser's time zone: "Resets 13:30 (in 2 h 10 min)", another day: "Resets Fri 09:00 (in 2 d 3 h)"
+         "function when(r){const d=new Date(r*1000),s=r-Date.now()/1000,"
+         "t=d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}),"
+         "day=d.toDateString()==new Date().toDateString()?'':d.toLocaleDateString('en-GB',{weekday:'short'})+' ';"
+         "if(s<=0)return 'Reset at '+day+t+' (passed)';const h=Math.floor(s/3600),m=Math.floor(s%3600/60);"
+         "return 'Resets '+day+t+' (in '+(h>=24?Math.floor(h/24)+' d '+h%24+' h':h?h+' h '+m+' min':m+' min')+')';}"
          "function poll(){if(document.hidden)return;fetch('/s').then(r=>r.json()).then(s=>{"
          "for(let i=0;i<5;i++){n[i].textContent=s.t[i];f[i].textContent=s.f[i]+' flashes';"
          "if(last&&s.f[i]!=last[i])lit[i]=Date.now();}"
          "wait=s.w;n[5].textContent=s.a;f[5].textContent=s.w?'waiting':'idle';last=s.f;"
-         "$('st').textContent=s.s;use(5,s.u5);use(7,s.u7);$('dn').textContent=s.d+' / '+s.e;}).catch(()=>{});}"
+         "$('st').textContent=s.s;use(5,s.u5,s.r5);use(7,s.u7,s.r7);$('dn').textContent=s.d+' / '+s.e;}).catch(()=>{});}"
          "function fade(){const now=Date.now();for(let i=0;i<5;i++)"
          "l[i].style.opacity=.15+.85*Math.max(0,1-(now-lit[i])/400);"
          "l[5].style.opacity=wait?(Math.floor(now/500)%2?1:.35):.15;requestAnimationFrame(fade);}"
@@ -1179,7 +1188,8 @@ void handleState() {
   bool waiting = waitUntil && (int32_t)(millis() - waitUntil) < 0;
   bool fresh = useAt && millis() - useAt < USE_MS;
   s += "],\"w\":" + String(waiting ? 1 : 0) + ",\"a\":" + String(approvals) + ",\"s\":\"" + stateName() + "\"" +
-       ",\"u5\":" + (fresh ? use5 : -1) + ",\"u7\":" + (fresh ? use7 : -1) + ",\"d\":" + doneOk + ",\"e\":" + doneErr + "}";
+       ",\"u5\":" + (fresh ? use5 : -1) + ",\"u7\":" + (fresh ? use7 : -1) +
+       ",\"r5\":" + (fresh ? reset5 : 0) + ",\"r7\":" + (fresh ? reset7 : 0) + ",\"d\":" + doneOk + ",\"e\":" + doneErr + "}";
   http.sendHeader("Cache-Control", "no-store");
   http.send(200, "application/json", s);
 }

@@ -103,7 +103,7 @@ USB only: `W <ssid>\t<password>`, `?` → `IP <address>` / `NOWIFI`.
 
 ## More features
 
-- **Web pages:** *Live* (virtual LEDs, click one to test it, usage bars, 7-day totals, status), *Settings* (all options) and
+- **Web pages:** *Live* (virtual LEDs, click one to test it, usage bars with the time each limit resets, 7-day totals, status), *Settings* (all options) and
   *System* (WiFi, firmware update over WiFi: upload `.pio/build/supermini/firmware.bin`; the page has no password).
 - **Finished / error signal:** at the end of a turn the LED shows solid green (finished) or blinking red (error).
 - **Approval has priority:** while Claude waits for approval, queued flashes are dropped and only the white blink runs.
@@ -137,9 +137,16 @@ USB only: `W <ssid>\t<password>`, `?` → `IP <address>` / `NOWIFI`.
   every second in step with the white blink until answered. Optionally a short click with every flash. Silent at night and in
   quiet mode. Use a buzzer module with a transistor, or keep a bare buzzer under ~20 mA. Test: click the approval LED on the Live page.
 
-New protocol lines: `D 0` / `D 1` (turn finished / error), `U <5h%> <7d%>` (usage, -1 = unknown).
+New protocol lines: `D 0` / `D 1` (turn finished / error), `U <5h%> <7d%> [<5h reset> <7d reset>]` (usage, -1 = unknown;
+optional reset times as Unix time, 0 = unknown).
 
 ## Enclosure (3D print, Fusion 360)
+
+| Front | Back (USB-C) |
+|---|---|
+| ![Assembled box from the front: the light window with the diffuser](enclosure/img/front.png) | ![Assembled box from the back: the USB-C opening](enclosure/img/back.png) |
+| **Without the lid** | **Exploded** |
+| ![Base without the lid: board rails, black baffle in front of the strip, diffuser](enclosure/img/open.png) | ![Exploded view: lid, diffuser and baffle lifted above the base with the LED strip](enclosure/img/exploded.png) |
 
 `enclosure/TokenLED_Box/TokenLED_Box.py` is a Fusion 360 script that builds the box (concept "A", parametric: change the numbers
 at the top and run it again). Fusion 360 > Utilities > Scripts and Add-Ins > Scripts > "+" > pick the `TokenLED_Box` folder > Run.
