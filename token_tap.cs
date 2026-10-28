@@ -265,7 +265,8 @@ static class TokenTap
                 switch (Get(d, "type") as string)
                 {
                     case "text_delta":       m.T += Len(d, "text");         m.ET += Emit(m, 't', m.T, m.ET); break;
-                    case "thinking_delta":   m.K += Len(d, "thinking");     m.EK += Emit(m, 'k', m.K, m.EK); break;
+                    // Redacted thinking streams no text, only "estimated_tokens" (tokens added since the last frame).
+                    case "thinking_delta":   m.K += Len(d, "thinking") + Num(d, "estimated_tokens") * CHARS_PER_TOKEN; m.EK += Emit(m, 'k', m.K, m.EK); break;
                     case "input_json_delta": m.J += Len(d, "partial_json"); m.EJ += Emit(m, 'j', m.J, m.EJ); break;
                 }
                 break;

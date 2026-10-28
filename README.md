@@ -10,7 +10,7 @@ It never calls the model and spends no tokens: it only watches output that is al
 | File | What it is |
 |---|---|
 | `token_tap.cs` → `token_tap.exe` | **Live flashing:** launcher for the VS Code Claude extension. Passes the `claude.exe` output through unchanged and sends the token stream and approval waits to the LED. |
-| `src/main.cpp` + `platformio.ini` | Firmware: onboard WS2812B (GPIO8) or an external strip, WiFi + USB + web page. |
+| `src/main.cpp` + `platformio.ini` | Firmware: onboard LED on GPIO8 (WS2812B or a plain LED), external strip, optional buzzer, WiFi + USB + web page. |
 | `token_blinker.py` | WiFi setup over USB, colour test, and log-based counting for terminal Claude Code sessions. |
 | `token_led.ino`, `token_led_test.py`, `token_proxy.py`, `claude-token-led.user.js` | Old proxy-based experiments (Hungarian comments), kept for reference. |
 
@@ -29,7 +29,9 @@ there is no network, Claude works exactly the same, it just does not flash. The 
 to switch it off, delete that line and start a new Claude session.
 
 Text, thinking and tool-input tokens are estimated while generating (4 characters ≈ 1 token); at the end of
-each message the real `output_tokens` tops up the difference. Input and cache tokens come exactly at the
+each message the real `output_tokens` tops up the difference. Thinking usually arrives redacted (no text, only
+`estimated_tokens` progress in each `thinking_delta`, the same numbers the extension's token counter shows), so those are
+counted instead. Input and cache tokens come exactly at the
 start of the request.
 
 | Colour | What | One flash (default) |
@@ -126,6 +128,14 @@ USB only: `W <ssid>\t<password>`, `?` → `IP <address>` / `NOWIFI`.
 - **Onboard LED section** (Settings): mode (mirror / status + approval only / off), its own brightness, which functions it mirrors
   (per type and approval), finished/error signal on or off, and an idle colour that follows the 5-hour usage.
 - The **System** page is sectioned too (WiFi, firmware update, backup, device).
+
+- **Onboard LED type** (Settings > Onboard LED): RGB WS2812B (default), or a plain LED lit on LOW (like the blue LED of the
+  plain SuperMini) or on HIGH. A plain LED cannot show colours, so it shows every colour as a brightness (PWM).
+  The onboard brightness percentage now also applies right after power-on.
+- **Buzzer** (Settings > Buzzer, off by default): an active or passive buzzer on its own GPIO (0-7 or 10, not the strip's pin;
+  a passive one gets a tone, 2700 Hz by default). Approval wait: silent, one beep (one more when the reminder starts), or a beep
+  every second in step with the white blink until answered. Optionally a short click with every flash. Silent at night and in
+  quiet mode. Use a buzzer module with a transistor, or keep a bare buzzer under ~20 mA. Test: click the approval LED on the Live page.
 
 New protocol lines: `D 0` / `D 1` (turn finished / error), `U <5h%> <7d%>` (usage, -1 = unknown).
 

@@ -14,6 +14,8 @@
 //   "?"                   status (USB only): "IP <address>" or "NOWIFI"
 // LED: red-green-blue test at power-on; a dim dot every 3 s = connecting (red) / setup AP running (yellow).
 // Onboard LED: mirrors everything (default), shows status/approval only, or is off. The strip shows the flashes.
+// It is an RGB WS2812B (default) or a plain LED (lit on LOW or HIGH) that shows every colour as a brightness.
+// Optional buzzer (active or passive) on its own GPIO: beeps for an approval wait and/or clicks with every flash.
 // Web pages: Live (http://tokenled.local), Settings, System (WiFi, firmware update over WiFi).
 // Optional: history strip, usage meter, night dimming (NTP time), 7-day totals (kept in flash), MQTT / Home Assistant.
 // Libraries: Adafruit NeoPixel, PubSubClient
@@ -32,7 +34,9 @@
 #include <PubSubClient.h>
 #include <Adafruit_NeoPixel.h>
 
-#define LED_PIN     8        // onboard WS2812B (fixed)
+#define LED_PIN     8        // onboard LED (fixed): WS2812B or a plain LED
+#define OB_PWM_CH   0        // LEDC channel that dims a plain onboard LED
+#define BZ_CH       2        // LEDC channel of a passive buzzer (own timer, so its tone does not change the LED PWM)
 #define STRIP_PIN   4        // default data pin of the external strip; pin and LED count are set on the web page
 #define UDP_PORT    4210
 #define HOSTNAME    "tokenled"   // http://tokenled.local
@@ -98,6 +102,11 @@ struct Cfg {
   bool glow, saver;
   bool doneSig, hist, night, mq, onbSig, onbUse;   // onbSig: finished/error on the onboard LED; onbUse: idle colour shows usage
   uint8_t onbMask, onbBr;   // onboard LED: shown functions (bit 0-4 types, 5 approval), brightness in percent
+  uint8_t onbT;             // onboard LED type: 0 RGB (WS2812B), 1 plain LED lit on LOW, 2 plain LED lit on HIGH
+  int8_t bzPin;             // buzzer GPIO, -1 = none
+  uint8_t bzT, bzAp;        // buzzer: 0 active, 1 passive; approval wait: 0 silent, 1 one beep, 2 beep until answered
+  bool bzFlash;             // buzzer clicks with every flash
+  uint16_t bzHz;            // tone of a passive buzzer
   uint8_t meter, nFrom, nTo, nBright;   // meter: 0 off, 1 five-hour, 2 weekly; night hours 0-23
   uint16_t mqPort, remind;   // remind: seconds of pending approval until the blink speeds up (0 = off)
   String tz, mqHost, mqUser, mqPass, mqTopic;
@@ -158,6 +167,12 @@ void loadCfg() {
   cfg.remind = prefs.getUShort("remind", 45);
   cfg.onbMask = prefs.getUChar("onbmask", 0x3F);
   cfg.onbBr  = prefs.getUChar("onbbr", 100);
+  cfg.onbT   = prefs.getUChar("onbt", 0);
+  cfg.bzPin  = prefs.getChar("bzpin", -1);
+  cfg.bzT    = prefs.getUChar("bzt", 0);
+  cfg.bzAp   = prefs.getUChar("bzap", 1);
+  cfg.bzFlash = prefs.getBool("bzfl", false);
+  cfg.bzHz   = prefs.getUShort("bzhz", 2700);
   cfg.onbSig = prefs.getBool("onbsig", true);
   cfg.onbUse = prefs.getBool("onbuse", false);
   cfg.mq     = prefs.getBool("mq", false);
@@ -196,6 +211,12 @@ void saveCfg() {
   prefs.putUShort("remind", cfg.remind);
   prefs.putUChar("onbmask", cfg.onbMask);
   prefs.putUChar("onbbr", cfg.onbBr);
+  prefs.putUChar("onbt", cfg.onbT);
+  prefs.putChar("bzpin", cfg.bzPin);
+  prefs.putUChar("bzt", cfg.bzT);
+  prefs.putUChar("bzap", cfg.bzAp);
+  prefs.putBool("bzfl", cfg.bzFlash);
+  prefs.putUShort("bzhz", cfg.bzHz);
   prefs.putBool("onbsig", cfg.onbSig);
   prefs.putBool("onbuse", cfg.onbUse);
   prefs.putBool("mq", cfg.mq);
@@ -225,16 +246,72 @@ bool nightNow() {
 
 uint8_t curBright() { return quiet || nightNow() ? cfg.nBright : cfg.bright; }
 
+// ---------- Onboard LED: WS2812B, or a plain LED dimmed by PWM ----------
+uint8_t obHw = 255;   // type GPIO8 is set up for (255 = not yet)
+uint8_t obBr = 0;     // onboard brightness (0-255), for the plain LED
+
+void obBegin() {   // (re)configures GPIO8 when the type changes
+  if (obHw == cfg.onbT) return;
+  if (obHw == 1 || obHw == 2) ledcDetachPin(LED_PIN);
+  obHw = cfg.onbT;
+  if (obHw == 0) ob.begin();
+  else { ledcSetup(OB_PWM_CH, 5000, 8); ledcAttachPin(LED_PIN, OB_PWM_CH); }
+}
+
+void obSet(uint32_t c) {   // a plain LED shows the brightest channel of the colour
+  if (cfg.onbT == 0) { ob.setPixelColor(0, c); ob.show(); return; }
+  uint32_t v = max(max(c >> 16 & 255, c >> 8 & 255), c & 255) * obBr / 255;
+  ledcWrite(OB_PWM_CH, cfg.onbT == 1 ? 255 - v : v);
+}
+
 void applyBright() {
   uint8_t b = curBright();
   if (b == appliedB) return;
   appliedB = b;
   px.setBrightness(b);
-  ob.setBrightness((uint32_t)b * cfg.onbBr / 100);
+  obBr = (uint32_t)b * cfg.onbBr / 100;
+  ob.setBrightness(obBr);
   shown = 1;   // new brightness: force the next colour to be written
 }
 
+// ---------- Buzzer ----------
+int8_t bzHw = -1;    // pin the buzzer is set up on (-1 = none)
+bool bzHwP = false;  // set up as passive
+uint32_t bzOff = 0;  // when the current beep ends (0 = silent)
+
+void bzSound(bool on) {
+  if (bzHw < 0) return;
+  if (bzHwP) ledcWrite(BZ_CH, on ? 512 : 0);   // 50 % duty of the 10-bit tone
+  else digitalWrite(bzHw, on ? HIGH : LOW);
+}
+
+void bzEnd() {   // releases the buzzer pin (before a pin change)
+  if (bzHw < 0) return;
+  bzSound(false);
+  if (bzHwP) ledcDetachPin(bzHw);
+  pinMode(bzHw, INPUT);
+  bzHw = -1;
+  bzOff = 0;
+}
+
+void bzBegin() {
+  if (bzHw >= 0 || cfg.bzPin < 0) return;
+  bzHw = cfg.bzPin;
+  bzHwP = cfg.bzT == 1;
+  if (bzHwP) { ledcSetup(BZ_CH, cfg.bzHz, 10); ledcAttachPin(bzHw, BZ_CH); }
+  else pinMode(bzHw, OUTPUT);
+  bzSound(false);
+}
+
+void bzBeep(uint16_t ms) {   // silent at night and in quiet mode
+  if (bzHw < 0 || quiet || nightNow()) return;
+  bzSound(true);
+  bzOff = (millis() + ms) | 1;   // never 0
+}
+
 void applyCfg() {
+  obBegin();
+  bzBegin();
   appliedB = 0;
   applyBright();
   shown = 1;
@@ -391,8 +468,7 @@ void led(uint32_t c, int target = -1, bool flash = false, int fn = -1) {
   bool obOn = cfg.onb == 0 || (cfg.onb == 1 && !flash);
   if (obOn && cfg.onb == 0 && fn >= 0 && fn <= 5 && !(cfg.onbMask >> fn & 1)) obOn = false;   // this function is not shown on the onboard LED
   if (obOn && fn == 6 && !cfg.onbSig) obOn = false;
-  ob.setPixelColor(0, obOn ? c : 0);
-  ob.show();
+  obSet(obOn ? c : 0);
   if (!px.numPixels()) return;
   if (target == -2 && cfg.onb != 2) c = 0;
   if (target == -2) { drawBase(); if (c) px.setPixelColor(0, c); } else drawStrip(c, target);
@@ -544,10 +620,26 @@ void play() {
   bool hm = histMode();
   if (hm) hcur = color(curType);
   led(color(curType), hm ? -3 : typeIdx(curType), true, typeIdx(curType));
+  if (cfg.bzFlash) bzBeep(5);   // a click
   flashes[typeIdx(curType)]++;
   if (--it.n == 0) { qHead = (qHead + 1) % QUEUE_LEN; qCount--; }
   pending--;
   state = ON; until = now + (pending > 15 ? 10 : 22);
+}
+
+// Ends a beep; approval wait: one beep at the start (and one more at the reminder), or a beep every second
+// in step with the white blink (every half second after the reminder).
+void buzzerTick() {
+  static uint32_t started = 0, slot = 0;
+  static bool reminded = false;
+  uint32_t now = millis();
+  if (bzOff && (int32_t)(now - bzOff) >= 0) { bzSound(false); bzOff = 0; }
+  if (!cfg.bzAp || !waitUntil || (int32_t)(now - waitUntil) >= 0) return;
+  bool late = cfg.remind && now - waitStart > cfg.remind * 1000UL;
+  uint32_t s = now / (late ? 500 : 1000);
+  if (waitStart != started) { started = waitStart; reminded = false; slot = s; bzBeep(120); return; }
+  if (cfg.bzAp == 1) { if (late && !reminded) { reminded = true; bzBeep(120); } return; }
+  if (s != slot) { slot = s; bzBeep(80); }
 }
 
 // ---------- BOOT button ----------
@@ -568,13 +660,13 @@ void buttonTick() {
   else if (p && down && !longDone && now - at > 1500) {
     longDone = true;
     resetCounters();
-    ob.setPixelColor(0, ob.Color(0, 0, 255)); ob.show(); delay(150); shown = 1;
+    obSet(ob.Color(0, 0, 255)); delay(150); shown = 1;
   } else if (!p && down) {
     down = false;
     if (!longDone && now - at > 30) {
       quiet = !quiet;
       applyBright();
-      ob.setPixelColor(0, quiet ? ob.Color(255, 160, 0) : ob.Color(0, 255, 0)); ob.show(); delay(150); shown = 1;
+      obSet(quiet ? ob.Color(255, 160, 0) : ob.Color(0, 255, 0)); delay(150); shown = 1;
     }
   }
 }
@@ -1000,6 +1092,8 @@ void handleSettings() {
   s += numField("remind", "Approval blink gets faster after (s, 0 = off)", cfg.remind, 0, 3600);
 
   s += "</details><details class=sec><summary>Onboard LED (GPIO8)</summary>";
+  s += selField("onbt", "Type", cfg.onbT, {"RGB (WS2812B)", "plain LED, lit on LOW (e.g. blue SuperMini LED)", "plain LED, lit on HIGH"});
+  s += "<small>A plain LED cannot show colours: it shows every colour as a brightness.</small>";
   s += selField("onb", "Mode", cfg.onb, {"mirror (selected functions)", "status + approval only", "off"});
   s += "<label><span>Brightness (%)</span><input type=number name=onbbr min=1 max=100 value=" + String(cfg.onbBr) + "></label>";
   s += "<small>Mirror shows these functions:</small>";
@@ -1008,6 +1102,13 @@ void handleSettings() {
   s += checkField("onbsig", "Show the finished (green) / error (red) signal", cfg.onbSig);
   s += checkField("onbuse", "Idle colour shows the 5-hour usage (green / yellow / red)", cfg.onbUse);
   s += "<small>Status dots (connecting, setup network) are always shown unless the mode is off.</small>";
+  s += "</details><details class=sec><summary>Buzzer</summary>";
+  s += numField("bzpin", "GPIO (0–7, 10; -1 = none)", cfg.bzPin, -1, 10);
+  s += selField("bzt", "Type", cfg.bzT, {"active (beeps by itself)", "passive (needs a tone)"});
+  s += numField("bzhz", "Tone of a passive buzzer (Hz)", cfg.bzHz, 100, 10000);
+  s += selField("bzap", "Approval wait", cfg.bzAp, {"silent", "one beep (one more at the reminder)", "beep until answered"});
+  s += checkField("bzfl", "Click with every flash", cfg.bzFlash);
+  s += "<small>Silent at night and in quiet mode. It cannot share the strip's pin. Test: click the approval LED on the Live page.</small>";
   s += "</details><details class=sec><summary>LEDs and colours</summary>";
   s += "<label><span>External strip: LEDs</span><input type=number name=count min=0 max=65535 list=cnt value=" +
        String(cfg.count) + "></label><datalist id=cnt><option>0<option>1<option>2<option>5<option>6<option>10<option>50<option>100</datalist>";
@@ -1117,6 +1218,15 @@ void applySettings(const ArgFn& arg, const HasFn& has) {
   if (pinOk(pin)) cfg.pin = pin;
 
   cfg.onbBr = constrain(arg("onbbr").toInt(), 1, 100);
+  cfg.onbT  = constrain(arg("onbt").toInt(), 0, 2);
+  String bp = arg("bzpin");
+  bp.trim();
+  int b = bp.length() ? bp.toInt() : -1;   // an empty field means none, not GPIO0
+  cfg.bzPin = pinOk(b) && !(b == cfg.pin && cfg.count) ? b : -1;
+  cfg.bzT   = constrain(arg("bzt").toInt(), 0, 1);
+  cfg.bzHz  = constrain(arg("bzhz").toInt(), 100, 10000);
+  cfg.bzAp  = constrain(arg("bzap").toInt(), 0, 2);
+  cfg.bzFlash = has("bzfl");
   cfg.onbMask = 0;
   for (int i = 0; i < 6; i++) if (has(String("onbm") + i)) cfg.onbMask |= 1 << i;
   cfg.onbSig = has("onbsig");
@@ -1146,6 +1256,7 @@ void applySettings(const ArgFn& arg, const HasFn& has) {
   mqReconf = true;
   saveCfg();
   xSemaphoreGive(cfgLock);
+  bzEnd();   // release the old buzzer pin first: the strip may move onto it
   if (hw) applyHw();
   applyCfg();
 }
@@ -1169,7 +1280,8 @@ String exportJson() {
   auto txt = [&](const String& k, const String& v) { s += "\"" + k + "\":" + jq(v) + ",\n"; };
   num("out", cfg.out); num("in", cfg.in); num("cache", cfg.cache); num("bright", cfg.bright);
   flag("glow", cfg.glow); flag("saver", cfg.saver); flag("done", cfg.doneSig); num("remind", cfg.remind);
-  num("onb", cfg.onb); num("onbbr", cfg.onbBr); flag("onbsig", cfg.onbSig); flag("onbuse", cfg.onbUse);
+  num("onb", cfg.onb); num("onbt", cfg.onbT); num("onbbr", cfg.onbBr); flag("onbsig", cfg.onbSig); flag("onbuse", cfg.onbUse);
+  num("bzpin", cfg.bzPin); num("bzt", cfg.bzT); num("bzhz", cfg.bzHz); num("bzap", cfg.bzAp); flag("bzfl", cfg.bzFlash);
   for (int i = 0; i < 6; i++) flag((String("onbm") + i).c_str(), cfg.onbMask >> i & 1); num("count", cfg.count); num("pin", cfg.pin);
   flag("hist", cfg.hist); num("meter", cfg.meter);
   flag("night", cfg.night); num("nfrom", cfg.nFrom); num("nto", cfg.nTo); num("nbr", cfg.nBright); txt("tz", cfg.tz);
@@ -1357,11 +1469,11 @@ void setup() {
   px.setPin(cfg.pin);
   px.updateLength(cfg.count);
   if (cfg.count && !px.numPixels()) cfg.count = 0;
-  ob.begin();
+  obBegin();
   px.begin();
-  appliedB = cfg.bright;
-  ob.setBrightness(appliedB);
-  px.setBrightness(appliedB);
+  if (cfg.bzPin >= 0 && (!pinOk(cfg.bzPin) || (cfg.bzPin == cfg.pin && cfg.count))) cfg.bzPin = -1;
+  bzBegin();
+  applyBright();   // appliedB is still 0, so both brightnesses are set (onboard with its percentage)
   const uint32_t test[] = {px.Color(255, 0, 0), px.Color(0, 255, 0), px.Color(0, 0, 255), 0};
   for (uint32_t c : test) { led(c); delay(250); }
 
@@ -1403,6 +1515,7 @@ void loop() {
   buttonTick();
   histTick();
   play();
+  buzzerTick();
   static uint32_t slow = 0;
   if (millis() - slow > 1000) {
     slow = millis();
