@@ -5,6 +5,10 @@ signals when Claude waits for your approval. WiFi, battery-capable, no proxy.
 
 It never calls the model and spends no tokens: it only watches output that is already flowing.
 
+![The printed box on a desk: a purple thinking flash, a blue flash, then the green "finished" signal across the strip](media/TokenBlinker.gif)
+
+[Video (MP4)](media/TokenBlinker.mp4)
+
 ## Files
 
 | File | What it is |
