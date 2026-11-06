@@ -39,7 +39,31 @@ screws and 4 adhesive rubber feet (10 mm).
 | `enclosure/` | 3D-printable case: Fusion 360 design and script, STL and print-ready 3MF plates. |
 | `src/main.cpp` + `platformio.ini` | Firmware: onboard LED on GPIO8 (WS2812B or a plain LED), external strip, optional buzzer, WiFi + USB + web page. |
 | `token_blinker.py` | WiFi setup over USB, colour test, and log-based counting for terminal Claude Code sessions. |
+| `skills/tokenblinker/` | Claude Code skill: Claude sets up, tests, configures and troubleshoots the LED for you (see below). |
 | `token_led.ino`, `token_led_test.py`, `token_proxy.py`, `claude-token-led.user.js` | Old proxy-based experiments (Hungarian comments), kept for reference. |
+
+## Claude Code skill
+
+`skills/tokenblinker/` is an Agent Skill, and this repository is also a Claude Code plugin, so Claude can do most
+of the above for you. Install it in Claude Code with
+
+```
+/plugin install tokenblinker --marketplace vmynick/TokenBlinker
+```
+
+(before Claude Code 2.1.275: `/plugin marketplace add vmynick/TokenBlinker`, then `/plugin install tokenblinker@tokenblinker`),
+or copy the folder to `~/.claude/skills/` (or a project's `.claude/skills/`). Then ask, for example, "set up my
+TokenBlinker", "make the thinking flashes red", "dark from 23:00 to 7:00" or "my LED stopped flashing". It:
+
+- installs the launcher to `~/.tokenblinker/` (on Windows compiled locally from `token_tap.cs`) and self-tests it
+  before touching the VS Code setting: output byte for byte, exit code, behaviour with the LED unreachable, and a
+  real signal to the LED, so a broken launcher can never lock you out of Claude;
+- tests the LED and reads its counters and usage, without spending tokens;
+- changes any setting by name and prints an undo command;
+- runs a doctor that checks the setting, the launcher, the network and settings that make the LED look dead.
+
+The helper is `skills/tokenblinker/scripts/tokenled.py` (standard library only; `--help`). Its `scripts/` folder
+holds copies of `token_tap.py`, `token_tap.cs` and `token_blinker.py`; copy them again when those change.
 
 ## How it works
 

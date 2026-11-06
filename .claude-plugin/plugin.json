@@ -1,0 +1,12 @@
+{
+  "name": "tokenblinker",
+  "description": "Set up, test, configure and troubleshoot TokenBlinker, the ESP32 desk LED that flashes live with the Claude Code token stream and blinks while Claude waits for approval.",
+  "version": "1.0.0",
+  "author": {
+    "name": "vmynick"
+  },
+  "homepage": "https://github.com/vmynick/TokenBlinker",
+  "repository": "https://github.com/vmynick/TokenBlinker",
+  "license": "MIT",
+  "keywords": ["led", "esp32", "hardware", "status-light", "tokens", "approval"]
+}
